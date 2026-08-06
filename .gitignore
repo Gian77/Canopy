@@ -1,0 +1,25 @@
+# ---- Nextflow transient state ----
+.nextflow/
+.nextflow.log*
+.nextflow.history
+nf-work-test/
+nf-work-*/
+work/
+
+# ---- Pipeline outputs ----
+results/
+results_*/
+
+# ---- Cluster run logs ----
+condor_logs/
+
+# ---- Local agent / editor state ----
+.claude/
+CLAUDE.md
+plan/
+
+# ---- Large input data (kept locally, not versioned) ----
+reads/
+refs/
+*_test/
+tests/**/*.fastq.gz

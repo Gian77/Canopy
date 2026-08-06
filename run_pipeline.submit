@@ -1,0 +1,51 @@
+######
+# HTCondor submit file — Canopy pipeline (Nextflow head process)
+#
+# Per-task resource requests come from nextflow.config labels:
+#   qc / qc_heavy     : 16 CPUs, 128 GB, 12-24h
+#   map               : 24 CPUs, 128 GB, 12h
+#   assemble_small    : 16 CPUs, 128 GB, 6h
+#   assemble_heavy    : 32 CPUs, 448 GB, 120h  (scarcity-1..5,9,11..13,20)
+#   polish            : 24 CPUs, 256 GB, 48h
+#
+# Usage: condor_submit run_pipeline.submit
+#
+# NOTE: this duplicates pipeline.condor / run_pipeline_condor.sh. Prefer
+# `condor_submit pipeline.condor` (documented in the README) unless you
+# specifically need a second, independently-tracked submission of the same
+# pipeline (e.g. a different sample run alongside an already-running one).
+######
+
+## universe = local runs the Nextflow head ON the submit machine
+## (scarcity-ap-1), which is required: the head must reach the HTCondor
+## schedd to submit per-task jobs, and compute nodes cannot reach the schedd.
+## (universe = scheduler is deprecated/unsupported here — do not use it.)
+universe = local
+
+## The Nextflow head process is a lightweight orchestrator
+request_cpus   = 2
+request_memory = 8GB
+
+## EXECUTABLE — run_pipeline_condor.sh runs Nextflow in the FOREGROUND (no
+## nohup/backgrounding), so Condor's process lifecycle actually tracks it.
+## run_pipeline.sh backgrounds itself and returns almost immediately, which
+## makes Condor think the job finished while Nextflow keeps running detached
+## — do NOT point this submit file at run_pipeline.sh.
+Executable = /mnt/cephfs/linuxhome/benucci/Canopy/run_pipeline_condor.sh
+initialdir = /mnt/cephfs/linuxhome/benucci/Canopy
+getenv     = true
+
+## NOTIFICATION
+notification = Never
+
+## OUTPUT LOGS
+output = /mnt/cephfs/linuxhome/benucci/Canopy/condor_logs/pipeline_submit.stdout.txt
+error  = /mnt/cephfs/linuxhome/benucci/Canopy/condor_logs/pipeline_submit.stderr.txt
+log    = /mnt/cephfs/linuxhome/benucci/Canopy/condor_logs/pipeline_submit.condor.log
+
+## Keep the job in the queue (held) if it exits non-zero so the failure is
+## inspectable rather than silently leaving the queue.
+on_exit_hold = (ExitCode =!= 0)
+
+## SUBMIT
+Queue

@@ -1,0 +1,27 @@
+# Submit the Canopy Nextflow head process as an HTCondor job.
+#
+# Usage (from the submit node, scarcity-ap-1):
+#   condor_submit pipeline.condor
+#   condor_q                       # watch the job
+#   condor_rm <cluster_id>         # stop it
+#
+# universe = local runs the job ON the submit machine instead of dispatching it
+# to a compute node. This is required: the Nextflow head must reach the schedd
+# to submit per-task jobs, and compute nodes cannot. NOTE: this previously
+# failed because the schedd reported no local slots — verify local-universe
+# slots are configured before relying on this.
+
+universe       = local
+executable     = run_pipeline_condor.sh
+initialdir     = /mnt/cephfs/linuxhome/benucci/Canopy
+getenv         = true
+
+output         = condor_logs/pipeline.condor.out
+error          = condor_logs/pipeline.condor.err
+log            = condor_logs/pipeline.condor.log
+
+# Keep the job in the queue (held) if it exits non-zero so the failure is
+# inspectable rather than silently leaving the queue.
+on_exit_hold   = (ExitCode =!= 0)
+
+queue
