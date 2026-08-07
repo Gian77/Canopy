@@ -12,10 +12,10 @@ set -euo pipefail
 
 export HOME=/mnt/cephfs/linuxhome/benucci
 CONDA_ENV="${HOME}/.conda/envs/nextflow"
-export JAVA_HOME="${CONDA_ENV}"
-export PATH="${CONDA_ENV}/bin:${PATH}"
-
 PROJECT_DIR=/mnt/cephfs/linuxhome/benucci/Canopy
+export JAVA_HOME="${CONDA_ENV}"
+export PATH="${PROJECT_DIR}/bin:${CONDA_ENV}/bin:${PATH}"
+
 cd "${PROJECT_DIR}"
 
 # Resume from the most recent session by default. Override with RESUME_SESSION to

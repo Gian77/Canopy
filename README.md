@@ -146,6 +146,11 @@ This uses separate `results_B11077/`, `nf-work-B11077/`, and Condor log paths. S
 `RESUME_SESSION=<session-uuid>` to resume a specific session, or
 `FINAL_ASSEMBLY=purge` to test the purged final-assembly choice.
 
+The Condor launchers prepend `bin/` to `PATH`, where Canopy provides a
+`condor_submit` wrapper that sends Nextflow-generated worker submissions to the
+remote schedd on `scarcity-ap-1.glbrc.org`. Override the scheduler with
+`CANOPY_CONDOR_SCHEDD` if the cluster configuration changes.
+
 **`bash run_pipeline.sh`** — a plain `nohup` launcher you run directly (e.g. inside `tmux`, see
 Interactive sessions below) instead of submitting it as a Condor job itself; per-process
 scheduling still goes through Condor via `-profile condor`, only the head process is unsupervised.

@@ -1,0 +1,8 @@
+#!/bin/bash
+# Route Nextflow-generated worker submissions to the scheduler explicitly.
+# Worker tasks may invoke condor_submit from an execute node, which does not
+# necessarily have a local schedd.
+set -euo pipefail
+
+REMOTE_SCHEDD="${CANOPY_CONDOR_SCHEDD:-scarcity-ap-1.glbrc.org}"
+exec /usr/bin/condor_submit -remote "${REMOTE_SCHEDD}" "$@"
