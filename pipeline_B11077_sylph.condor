@@ -1,4 +1,4 @@
-# Submit the B11077 Sylph/decontamination regression run as a local-universe
+# Submit the B11077 Sylph/decontamination regression run as a vanilla-universe
 # Nextflow head job. The pipeline's individual tasks are submitted to Condor
 # by Nextflow using the resource labels in nextflow.config.
 #
@@ -11,9 +11,10 @@
 # Pin a known session when resuming after a preview or another invocation:
 #   RESUME_SESSION=<session-uuid> condor_submit pipeline_B11077_sylph.condor
 
-# The head process must run in the local universe on the submit host so that
-# Nextflow can reach the local schedd when it submits worker tasks.
-universe       = local
+# The head process must run on the submit host, but local universe is not
+# supported reliably here. Vanilla is required by the Canopy Condor rule.
+universe       = vanilla
+requirements   = (Machine == "scarcity-ap-1.glbrc.org")
 executable     = run_B11077_sylph_condor.sh
 initialdir     = /mnt/cephfs/linuxhome/benucci/Canopy
 getenv         = true
