@@ -21,7 +21,8 @@ process FINAL_SUMMARY {
           path(busco_medaka,    stageAs: 'busco_medaka_summary.txt'),
           path(busco_purge,     stageAs: 'busco_purge_summary.txt'),
           path(busco_decontam,  stageAs: 'busco_decontam_summary.txt'),
-          path(contam_summary,  stageAs: 'contam_summary.txt')
+          path(contam_summary,  stageAs: 'contam_summary.txt'),
+          path(sylph_summary,   stageAs: 'sylph_summary.txt')
 
     output:
     tuple val(sample_id), path("${sample_id}_assembly_summary.md"), emit: summary
@@ -34,6 +35,7 @@ process FINAL_SUMMARY {
     def screened  = (params.run_kraken2 || params.run_blobtools)
     def taxo_screened = params.run_kraken2
     def decontam_ran  = params.flag_contaminants
+    def sylph_ran     = params.verify_sylph
     """
     #!/usr/bin/env bash
     set -uo pipefail
@@ -44,6 +46,7 @@ process FINAL_SUMMARY {
     BUSCO_PURGE="busco_purge_summary.txt"
     BUSCO_DECONTAM="busco_decontam_summary.txt"
     CONTAM_SUMMARY="contam_summary.txt"
+    SYLPH_SUMMARY="sylph_summary.txt"
     # Headline BUSCO = the published final genome's (default medaka).
     if [ "${final_asm}" = "purge" ]; then BUSCO="\$BUSCO_PURGE"; else BUSCO="\$BUSCO_MEDAKA"; fi
     CUTOFFS="${purge_cutoffs}"
@@ -148,6 +151,10 @@ process FINAL_SUMMARY {
     CONTAM_BASES=\$(grep '^bases_removed='        "\$CONTAM_SUMMARY" 2>/dev/null | cut -d= -f2 || echo 0)
     CONTAM_PHYLA=\$(grep '^phyla_detected='       "\$CONTAM_SUMMARY" 2>/dev/null | cut -d= -f2 || echo "none")
     CONTAM_MB=\$(echo "\$CONTAM_BASES" | awk '{printf "%.2f", \$1/1e6}')
+
+    # Sylph corroboration counts (only meaningful when sylph_ran).
+    SYLPH_CORROBORATED=\$(grep '^sylph_corroborated='      "\$SYLPH_SUMMARY" 2>/dev/null | cut -d= -f2 || echo 0)
+    SYLPH_TOTAL=\$(grep '^sylph_total_candidates='         "\$SYLPH_SUMMARY" 2>/dev/null | cut -d= -f2 || echo 0)
 
     PEAK=\$(grep "autotune" "\$CALCUTS" 2>/dev/null | grep -o 'Peak: [0-9]*x' | grep -o '[0-9]*' || echo "unknown")
 
@@ -357,6 +364,9 @@ process FINAL_SUMMARY {
           echo "| Decontam genome fraction | \${GFRAC_DECONTAM}% |"
           echo "| Decontam N50 | \$(echo \$N50_DECONTAM | awk '{printf "%.1f Mb", \$1/1e6}') |"
           echo "| Decontam BUSCO complete / duplicated | \${BUSCO_C_DECONTAM}% / \${BUSCO_D_DECONTAM}% |"
+          if [ "${sylph_ran}" = "true" ]; then
+              echo "| Sylph-corroborated (independent ANI vs GTDB) | \$SYLPH_CORROBORATED / \$SYLPH_TOTAL |"
+          fi
           echo
           echo "> **Interpretation:** \$CONTAM_FLAGGED contigs (\${CONTAM_MB} Mb) were flagged as" \
                "contaminant -- simultaneously non-${params.contam_target_phylum} by BlobTools," \
@@ -364,6 +374,17 @@ process FINAL_SUMMARY {
                "GC fraction typical of eukaryotic nuclear sequence. See qc/contamination/ for the" \
                "full per-contig audit table before trusting this genome version, given known" \
                "Kraken2 long-contig misclassification risk on assembled scaffolds."
+          if [ "${sylph_ran}" = "true" ]; then
+              echo
+              echo "> Sylph corroboration: \$SYLPH_CORROBORATED of \$SYLPH_TOTAL flagged contigs" \
+                   "also had a confident (>=${params.sylph_min_ani}% adjusted ANI) containment" \
+                   "match to a real GTDB reference genome -- an independent method agreeing with" \
+                   "Kraken2's taxonomy call. See qc/contamination/*_sylph_corroboration.tsv for" \
+                   "per-contig detail. This is advisory only and did not change what was removed." \
+                   "Note: short contigs (a few kb) may show 'no' simply because there isn't" \
+                   "enough sequence for a confident ANI estimate at Sylph's default sketch" \
+                   "density -- that is not the same as Sylph actively disagreeing with Kraken2."
+          fi
           echo
       fi
 
@@ -435,7 +456,9 @@ process PACKAGE_RESULTS {
           val(has_blobplots),
           path(decontam_fasta, stageAs: 'decontam.fasta'),
           path(contam_audit,   stageAs: 'contamination_audit.tsv'),
-          val(has_decontam)
+          val(has_decontam),
+          path(sylph_corroboration, stageAs: 'sylph_corroboration.tsv'),
+          val(has_sylph)
 
     output:
     tuple val(sample_id), path("${sample_id}_final_package.zip"), emit: zip
@@ -464,6 +487,10 @@ process PACKAGE_RESULTS {
     if [ "${has_decontam}" = "true" ]; then
         cp decontam.fasta            "\$PKG/${sample_id}_nuclear_decontam.fasta"
         cp contamination_audit.tsv   "\$PKG/${sample_id}_contamination_audit.tsv"
+    fi
+
+    if [ "${has_sylph}" = "true" ]; then
+        cp sylph_corroboration.tsv   "\$PKG/${sample_id}_sylph_corroboration.tsv"
     fi
 
     cat > "\$PKG/README.txt" << 'EOF'

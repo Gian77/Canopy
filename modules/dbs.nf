@@ -119,6 +119,37 @@ workflow FETCH_KRAKEN2_PLUSPFP {
     db = DOWNLOAD_KRAKEN2_PLUSPFP.out.db
 }
 
+// ============================================================
+// Sylph GTDB sketch database — corroborates Kraken2's contaminant calls with an
+// independent containment-ANI method against real reference genomes (GTDB r226,
+// ~113k bacterial/archaeal representatives). Only the flagged candidate contigs are
+// queried against this (typically a handful per sample), so a much smaller/cheaper
+// database than Kraken2's PlusPFP suffices: ~17 GB vs ~172 GB compressed.
+// ============================================================
+
+process DOWNLOAD_SYLPH_GTDB {
+    label    'fetch'
+    storeDir "${projectDir}/databases/sylph"
+    // no container — uses host curl
+
+    output:
+    path "gtdb-r226-c200-dbv1.syldb", emit: db
+
+    script:
+    """
+    curl -fSL -o gtdb-r226-c200-dbv1.syldb \\
+        https://faust.compbio.cs.cmu.edu/sylph-stuff/gtdb-r226-c200-dbv1.syldb
+    """
+}
+
+workflow FETCH_SYLPH_GTDB {
+    main:
+    DOWNLOAD_SYLPH_GTDB()
+
+    emit:
+    db = DOWNLOAD_SYLPH_GTDB.out.db
+}
+
 workflow BUILD_OATKDB {
     take:
     cp_fasta   // Channel<Path>  — chloroplast reference FASTA

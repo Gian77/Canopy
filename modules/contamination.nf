@@ -198,6 +198,122 @@ PYEOF
 // a hard dependency for the QUAST_NUCLEAR/BUSCO_NUCLEAR 'decontam' columns downstream, so a
 // failure here should surface clearly rather than silently produce a misleading empty or
 // zero-genome-fraction column.
+// Second-opinion corroboration for the (typically very few) contigs CLASSIFY_CONTAMINANTS
+// flagged: an independent containment-ANI method (Sylph) against real GTDB reference genomes,
+// rather than Kraken2's k-mer LCA approach. Only queries the flagged candidates — cheap even
+// though the GTDB database itself is large — so this is advisory extra confidence, not a gate
+// on removal (REMOVE_CONTAMINANTS' behavior is unchanged either way).
+process EXTRACT_CANDIDATE_CONTIGS {
+    tag           { sample_id }
+    label         'qc'
+    errorStrategy 'ignore'
+    container     'quay.io/biocontainers/seqkit:2.13.0--he881be0_0'
+
+    input:
+    tuple val(sample_id), path(assembly), path(contaminant_ids)
+
+    output:
+    tuple val(sample_id), path("${sample_id}_candidates.fasta"), emit: fasta
+
+    script:
+    """
+    if [ -s ${contaminant_ids} ]; then
+        seqkit grep -f ${contaminant_ids} ${assembly} -o ${sample_id}_candidates.fasta
+    else
+        : > ${sample_id}_candidates.fasta
+    fi
+    """
+}
+
+process SYLPH_VERIFY_CONTAMINANTS {
+    tag           { sample_id }
+    label         'qc'
+    errorStrategy 'ignore'
+    publishDir    { "${params.outdir}/qc/contamination/${sample_id}" }, mode: 'copy'
+    container     'quay.io/biocontainers/sylph:0.9.0--ha6fb395_0'
+
+    input:
+    tuple val(sample_id), path(candidates)
+    path sylph_db
+
+    output:
+    tuple val(sample_id), path("${sample_id}_sylph_corroboration.tsv"), emit: corroboration
+    tuple val(sample_id), path("${sample_id}_sylph_summary.txt"),       emit: summary
+
+    script:
+    def sample  = sample_id
+    def min_ani = params.sylph_min_ani
+    """
+    #!/usr/bin/env bash
+    set -uo pipefail
+
+    if [ ! -s ${candidates} ]; then
+        printf "contig\\tbest_ani\\tbest_match_genome\\tcorroborated\\n" > ${sample}_sylph_corroboration.tsv
+        echo "sylph_corroborated=0" > ${sample}_sylph_summary.txt
+        echo "sylph_total_candidates=0" >> ${sample}_sylph_summary.txt
+        exit 0
+    fi
+
+    # Sketch each candidate contig as its OWN sample (-r: read-mode sketch, not a genome
+    # database — 'query' mode's Contig_name column identifies the matched REFERENCE genome's
+    # contig, not the query's, so pooling multiple query contigs into one sketch would make
+    # results impossible to attribute back to a specific candidate). One .sylsp per contig
+    # keeps them distinguishable via the Sample_file column in the query output.
+    mkdir -p per_contig sketches
+    awk '/^>/{f="per_contig/" substr(\$1,2) ".fasta"} {print > f}' ${candidates}
+    for f in per_contig/*.fasta; do
+        sylph sketch -r "\$f" -d sketches -t ${task.cpus}
+    done
+
+    sylph query ${sylph_db} sketches/*.sylsp \\
+        -m ${min_ani} -t ${task.cpus} -o ${sample}_sylph_query.tsv
+
+    python3 - "${sample}_sylph_query.tsv" "${sample}" "${candidates}" <<'PYEOF'
+import sys, csv, collections
+
+query_tsv, sample, candidates_fasta = sys.argv[1:4]
+
+all_contigs = []
+with open(candidates_fasta) as fh:
+    for line in fh:
+        if line.startswith('>'):
+            all_contigs.append(line[1:].split()[0])
+
+best = {}
+try:
+    with open(query_tsv) as fh:
+        reader = csv.DictReader(fh, delimiter='\\t')
+        for row in reader:
+            # Sample_file is 'per_contig/<contig>.fasta' (sylph keeps the sketched
+            # input's basename) — recover the contig id from it, not Contig_name
+            # (that column names the matched REFERENCE genome's contig).
+            sample_file = row.get('Sample_file', '')
+            contig = sample_file.split('/')[-1].removesuffix('.fasta')
+            ani = float(row['Adjusted_ANI'])
+            genome = row.get('Genome_file', 'NA')
+            if contig not in best or ani > best[contig][0]:
+                best[contig] = (ani, genome)
+except FileNotFoundError:
+    pass
+
+corroborated = 0
+with open(f"{sample}_sylph_corroboration.tsv", 'w') as out:
+    out.write("contig\\tbest_ani\\tbest_match_genome\\tcorroborated\\n")
+    for contig in all_contigs:
+        if contig in best:
+            ani, genome = best[contig]
+            out.write(f"{contig}\\t{ani:.2f}\\t{genome}\\tyes\\n")
+            corroborated += 1
+        else:
+            out.write(f"{contig}\\tNA\\tNA\\tno\\n")
+
+with open(f"{sample}_sylph_summary.txt", 'w') as s:
+    s.write(f"sylph_corroborated={corroborated}\\n")
+    s.write(f"sylph_total_candidates={len(all_contigs)}\\n")
+PYEOF
+    """
+}
+
 process REMOVE_CONTAMINANTS {
     tag        { sample_id }
     label      'qc'

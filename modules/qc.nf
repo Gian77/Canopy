@@ -235,6 +235,36 @@ process SORT_FOR_QC {
     """
 }
 
+// BlobTools 1.x's own "% reads mapped" stat is internally inconsistent on BAMs with many
+// secondary/supplementary alignments (routine for ONT + minimap2 on a repetitive genome):
+// its numerator (BtIO.py check_mapped_read) correctly excludes secondary/supplementary per
+// contig, but its denominator (BtIO.py checkBam: aln.mapped + aln.unmapped) comes straight
+// from the BAM index and counts every alignment RECORD, secondary/supplementary included.
+// With ~5x more secondary+supplementary records than primary alignments, that mismatch alone
+// can make BlobTools report ~15% "mapped" when the true read-level rate is ~100%. Filtering
+// to primary alignments only before BlobTools sees the BAM makes both sides of its fraction
+// agree — it does not change per-contig coverage/GC/taxonomy (those already excluded
+// secondary/supplementary), only the misleading summary percentage.
+process FILTER_PRIMARY_BAM {
+    tag       { "${sample_id}_${stage}" }
+    label     'map'
+    container 'quay.io/biocontainers/samtools:1.6--h5fe306e_13'
+
+    input:
+    tuple val(sample_id), val(stage), path(assembly), path(bam), path(bai)
+
+    output:
+    tuple val(sample_id), val(stage), path(assembly),
+          path("${sample_id}_${stage}.primary.bam"),
+          path("${sample_id}_${stage}.primary.bam.bai"), emit: bam
+
+    script:
+    """
+    samtools view -@ ${task.cpus} -F 0x900 -b ${bam} > ${sample_id}_${stage}.primary.bam
+    samtools index ${sample_id}_${stage}.primary.bam
+    """
+}
+
 process QUALIMAP_BAMQC {
     tag       { "${sample_id}_${stage}" }
     label     'qc'

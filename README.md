@@ -7,6 +7,10 @@
 [![Open Issues](https://img.shields.io/github/issues/Gian77/Canopy)](https://github.com/Gian77/Canopy/issues)
 <!-- badges: end -->
 
+<p align="center">
+  <img src=".logo/canopy_logo.png" alt="Canopy logo">
+</p>
+
 ## a nextflow pipeline for plant genome assembly
 
 `Canopy` is a [nextflow](https://www.nextflow.io/) pipeline for plant genome assembly.

@@ -23,3 +23,4 @@ reads/
 refs/
 *_test/
 tests/**/*.fastq.gz
+databases/

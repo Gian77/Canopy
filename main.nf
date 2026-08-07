@@ -69,13 +69,13 @@ def helpMessage() {
 // Module order itself follows the pipeline stages: QC → mapping → assembly → polishing.
 
 // QC: read stats, filtering, BUSCO completeness, MultiQC aggregation
-include {NANOPLOT; FILTER_READS; FILTER_ORGANELLE_CONTIGS; BUSCO_NUCLEAR; MULTIQC; BANDAGE_IMAGE; QUAST_ORGANELLE; QUAST_NUCLEAR; ALIGN_FOR_QC; SORT_FOR_QC; QUALIMAP_BAMQC; BLOBTOOLS_COVERAGE} from './modules/qc.nf'
-include {FETCH_OATKDB; FETCH_KRAKEN2_PLUSPFP} from './modules/dbs.nf'
+include {NANOPLOT; FILTER_READS; FILTER_ORGANELLE_CONTIGS; BUSCO_NUCLEAR; MULTIQC; BANDAGE_IMAGE; QUAST_ORGANELLE; QUAST_NUCLEAR; ALIGN_FOR_QC; SORT_FOR_QC; FILTER_PRIMARY_BAM; QUALIMAP_BAMQC; BLOBTOOLS_COVERAGE} from './modules/qc.nf'
+include {FETCH_OATKDB; FETCH_KRAKEN2_PLUSPFP; FETCH_SYLPH_GTDB} from './modules/dbs.nf'
 include {ALIGN_TO_ORGANELLES; SORT_INDEX_BAM; EXTRACT_RAW_READSETS; DEDUP_ORGANELLE_READS; READSET_STATS} from './modules/mapping.nf'
 include {ASSEMBLE_CP_FLYE; ASSEMBLE_MT_FLYE; ASSEMBLE_ORGANELLES_OATK; ASSEMBLE_NUCLEAR} from './modules/assembly.nf'
 include {POLISH_MEDAKA; POLISH_MEDAKA_ORGANELLE; PURGE_DUPS; ALIGN_FOR_HAPDUP; SORT_FOR_HAPDUP; HAPDUP} from './modules/polishing.nf'
 include {RAGTAG_SCAFFOLD; RAGTAG_SCAFFOLD as RAGTAG_PREPURGE} from './modules/scaffolding.nf'
-include {KRAKEN2_CLASSIFY; BLOBTOOLS_TAXONOMY; CLASSIFY_CONTAMINANTS; REMOVE_CONTAMINANTS} from './modules/contamination.nf'
+include {KRAKEN2_CLASSIFY; BLOBTOOLS_TAXONOMY; CLASSIFY_CONTAMINANTS; REMOVE_CONTAMINANTS; EXTRACT_CANDIDATE_CONTIGS; SYLPH_VERIFY_CONTAMINANTS} from './modules/contamination.nf'
 include {FINAL_SUMMARY; TOOLS_REPORT; PACKAGE_RESULTS} from './modules/reports.nf'
 
 // ============================================================
@@ -102,6 +102,10 @@ workflow {
     if (params.flag_contaminants && !(params.run_kraken2 && params.nuclear_ref)) {
         exit 1, "ERROR: --flag_contaminants requires --run_kraken2 (for BlobTools phylum calls) " +
                 "and --nuclear_ref (for RagTag placement/AGP). Enable both, or drop --flag_contaminants."
+    }
+    if (params.verify_sylph && !params.flag_contaminants) {
+        exit 1, "ERROR: --verify_sylph requires --flag_contaminants (it corroborates the " +
+                "contigs that step already flagged). Enable both, or drop --verify_sylph."
     }
 
     // ---- Banner ----
@@ -320,8 +324,17 @@ workflow {
         ALIGN_FOR_QC(qc_align_in)
         SORT_FOR_QC(ALIGN_FOR_QC.out.sam)
 
-        if (params.run_qualimap)  QUALIMAP_BAMQC(SORT_FOR_QC.out.bam)
-        if (params.run_blobtools) BLOBTOOLS_COVERAGE(SORT_FOR_QC.out.bam)
+        if (params.run_qualimap) QUALIMAP_BAMQC(SORT_FOR_QC.out.bam)
+
+        // BlobTools' own "% reads mapped" is unreliable on a BAM with many secondary/
+        // supplementary alignments (routine for ONT + minimap2 on a repetitive genome) — see
+        // FILTER_PRIMARY_BAM in modules/qc.nf for why. Feed BlobTools/Kraken2 a primary-only
+        // BAM instead; Qualimap keeps the original (it benefits from seeing multi-mapping).
+        if (params.run_blobtools || params.run_kraken2) {
+            FILTER_PRIMARY_BAM(SORT_FOR_QC.out.bam)
+            primary_bam_ch = FILTER_PRIMARY_BAM.out.bam
+        }
+        if (params.run_blobtools) BLOBTOOLS_COVERAGE(primary_bam_ch)
 
         // Contaminant screening on the final genome: Kraken2 classifies contigs against
         // PlusPFP (includes a plant clade, so host sequence gets a real match), then BlobTools
@@ -338,7 +351,7 @@ workflow {
                 kraken2_db_ch = FETCH_KRAKEN2_PLUSPFP.out.db
                 taxdump_ch    = FETCH_KRAKEN2_PLUSPFP.out.db
             }
-            KRAKEN2_CLASSIFY(SORT_FOR_QC.out.bam, kraken2_db_ch)
+            KRAKEN2_CLASSIFY(primary_bam_ch, kraken2_db_ch)
             BLOBTOOLS_TAXONOMY(KRAKEN2_CLASSIFY.out.hits, taxdump_ch)
 
             // Flag + remove contaminant contigs from the final genome (3-way AND: non-target
@@ -348,6 +361,20 @@ workflow {
                 CLASSIFY_CONTAMINANTS(classify_in)
                 REMOVE_CONTAMINANTS(nuclear_final.join(CLASSIFY_CONTAMINANTS.out.ids))
                 decontam_final = REMOVE_CONTAMINANTS.out.assembly
+
+                // Independent second opinion on the flagged candidates only (typically a
+                // handful of contigs) — containment ANI against real GTDB genomes, rather than
+                // Kraken2's k-mer LCA approach. Advisory: does not change what got removed above.
+                if (params.verify_sylph) {
+                    if (file(params.sylph_db).exists()) {
+                        sylph_db_ch = Channel.value(file(params.sylph_db, checkIfExists: true))
+                    } else {
+                        FETCH_SYLPH_GTDB()
+                        sylph_db_ch = FETCH_SYLPH_GTDB.out.db
+                    }
+                    EXTRACT_CANDIDATE_CONTIGS(nuclear_final.join(CLASSIFY_CONTAMINANTS.out.ids))
+                    SYLPH_VERIFY_CONTAMINANTS(EXTRACT_CANDIDATE_CONTIGS.out.fasta, sylph_db_ch)
+                }
             }
         }
     }
@@ -431,6 +458,7 @@ workflow {
         // contamination summary is optional (only when --flag_contaminants); pad with an
         // empty file via remainder:true + null-check, same pattern as blob_ch below.
         contam_summary_ch = params.flag_contaminants ? CLASSIFY_CONTAMINANTS.out.summary : Channel.empty()
+        sylph_summary_ch  = params.verify_sylph      ? SYLPH_VERIFY_CONTAMINANTS.out.summary : Channel.empty()
 
         // FINAL_SUMMARY picks the final genome's BUSCO from medaka/purge in-script.
         summary_in = nano_stats_ch
@@ -442,9 +470,11 @@ workflow {
             .join(purge_busco_ch)
             .join(decontam_busco_ch)
             .join(contam_summary_ch, remainder: true)
-            .map { id, nano, quast, cutoffs, calcuts, ragtag, bmed, bpurge, bdecon, contam ->
+            .join(sylph_summary_ch, remainder: true)
+            .map { id, nano, quast, cutoffs, calcuts, ragtag, bmed, bpurge, bdecon, contam, sylph ->
                 tuple(id, nano, quast, cutoffs, calcuts, ragtag, bmed, bpurge, bdecon,
-                      contam != null ? contam : [])
+                      contam != null ? contam : [],
+                      sylph  != null ? sylph  : [])
             }
         FINAL_SUMMARY(summary_in)
     }
@@ -469,9 +499,10 @@ workflow {
         blob_ch = params.run_kraken2 ? BLOBTOOLS_TAXONOMY.out.results : Channel.empty()
 
         // Decontam FASTA + audit table are optional (only when --flag_contaminants); same
-        // remainder:true + null-check idiom as blob_ch.
+        // remainder:true + null-check idiom as blob_ch. Sylph corroboration likewise optional.
         decontam_pkg_ch = has_decontam ? decontam_final : Channel.empty()
         contam_audit_ch = has_decontam ? CLASSIFY_CONTAMINANTS.out.audit : Channel.empty()
+        sylph_pkg_ch    = params.verify_sylph ? SYLPH_VERIFY_CONTAMINANTS.out.corroboration : Channel.empty()
 
         package_in = FINAL_SUMMARY.out.summary
             .join(nuclear_final)
@@ -485,13 +516,16 @@ workflow {
             .join(blob_ch, remainder: true)
             .join(decontam_pkg_ch, remainder: true)
             .join(contam_audit_ch, remainder: true)
+            .join(sylph_pkg_ch, remainder: true)
             .combine(TOOLS_REPORT.out)
-            .map { id, summary, scaffold, agp, cp, mt, qn, qcp, qmt, busco, blob, decontam, audit, tools ->
+            .map { id, summary, scaffold, agp, cp, mt, qn, qcp, qmt, busco, blob, decontam, audit, sylph, tools ->
                 def hasBlob     = (blob != null)
                 def hasDecontam = (decontam != null)
+                def hasSylph    = (sylph != null)
                 tuple(id, summary, tools, scaffold, agp, cp, mt, qn, qcp, qmt, busco,
                       hasBlob ? blob : [], hasBlob,
-                      hasDecontam ? decontam : [], hasDecontam ? audit : [], hasDecontam)
+                      hasDecontam ? decontam : [], hasDecontam ? audit : [], hasDecontam,
+                      hasSylph ? sylph : [], hasSylph)
             }
         PACKAGE_RESULTS(package_in)
     }
