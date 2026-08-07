@@ -134,6 +134,18 @@ condor_q                # watch the job
 condor_rm <cluster_id>  # stop it
 ```
 
+For the dedicated B11077 Sylph/decontamination regression run:
+
+```bash
+mkdir -p condor_logs
+condor_submit pipeline_B11077_sylph.condor
+condor_q
+```
+
+This uses separate `results_B11077/`, `nf-work-B11077/`, and Condor log paths. Set
+`RESUME_SESSION=<session-uuid>` to resume a specific session, or
+`FINAL_ASSEMBLY=purge` to test the purged final-assembly choice.
+
 **`bash run_pipeline.sh`** — a plain `nohup` launcher you run directly (e.g. inside `tmux`, see
 Interactive sessions below) instead of submitting it as a Condor job itself; per-process
 scheduling still goes through Condor via `-profile condor`, only the head process is unsupervised.
