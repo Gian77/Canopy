@@ -52,10 +52,15 @@ For each sample:
     contaminant only when **all three** hold: non-target phylum by BlobTools, unplaced by
     RagTag, and abnormal GC% — then produces a `decontam` genome version, QC'd with
     QUAST/BUSCO alongside the other candidates. Requires `--run_kraken2` + `--nuclear_ref`.
-16. **Reports** — MultiQC aggregation, a human-readable per-sample assembly summary
+16. **Sylph corroboration (optional)** — `--verify_sylph` independently checks only the
+    contigs flagged above against GTDB using containment ANI. It is advisory and does not
+    change which contigs are removed; it requires `--flag_contaminants` and records a
+    per-contig corroboration table in the published QC output and results archive.
+17. **Reports** — MultiQC aggregation, a human-readable per-sample assembly summary
     (`FINAL_SUMMARY`, requires `--nuclear_ref`), a tool-citations report, and
     `PACKAGE_RESULTS` — zips the summary, final genome, organelle FASTAs, QUAST/BUSCO
-    reports, and (when enabled) the blob plot and contamination audit into one small archive
+    reports, and (when enabled) the blob plot, contamination audit, and Sylph corroboration
+    into one small archive
 
 ## Directory structure expected
 
@@ -195,9 +200,25 @@ speed/accuracy setting, pick the matching Medaka model instead.
 | `--flag_contaminants`   | `false`                                | Flags + removes contaminant contigs (needs `--run_kraken2` + `--nuclear_ref`); produces a `decontam` genome version |
 | `--contam_target_phylum`| `Streptophyta`                         | Plant phylum for the non-target-phylum check                   |
 | `--contam_gc_min`/`--contam_gc_max` | `0.20` / `0.70`             | Eukaryotic-normal GC fraction range for the flagging rule       |
+| `--verify_sylph`        | `false`                                | Advisory ANI corroboration of flagged contigs against GTDB; requires `--flag_contaminants` |
+| `--sylph_db`            | `${projectDir}/databases/sylph/gtdb-r226-c200-dbv1.syldb` | Sylph GTDB sketch database; downloaded automatically if the path is absent |
+| `--sylph_min_ani`       | `90`                                  | Minimum adjusted ANI passed to Sylph query                             |
 | `--outdir`              | `results`                              | Output directory                                                |
 
 > `--skip_purge` is retired — purge_dups always runs now; use `--final_assembly medaka` (equivalent to the old skip behavior) or `--final_assembly purge`.
+
+To enable independent Sylph corroboration alongside contaminant flagging:
+
+```bash
+--run_kraken2 true \
+--flag_contaminants true \
+--verify_sylph true
+```
+
+Sylph queries only the small set of candidate contigs, while its GTDB sketch database is
+stored under `databases/sylph/` and reused across runs. A Sylph non-match is not treated as
+proof that Kraken2/BlobTools was wrong; short contigs may simply lack enough sequence for a
+confident ANI estimate.
 
 ## Resource classes (configured in nextflow.config)
 
