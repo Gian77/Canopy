@@ -40,7 +40,7 @@ process POLISH_MEDAKA_ORGANELLE {
 
     output:
     tuple val(sample_id), val(compartment), path("${sample_id}_${compartment}_polished.fasta"), emit: assembly
-    path "medaka_${sample_id}_${compartment}/*",                                                 emit: log
+    path "medaka_${sample_id}_${compartment}/*", optional: true,                                 emit: log
 
     script:
     """

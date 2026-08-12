@@ -5,7 +5,7 @@
 
 process NANOPLOT {
     tag        { sample_id }
-    label      'qc'
+    label      'qc_light'
     publishDir { "${params.outdir}/qc/nanoplot/${sample_id}" }, mode: 'copy'
     container  'quay.io/biocontainers/nanoplot:1.43.0--pyhdfd78af_1'
 
@@ -27,7 +27,7 @@ process NANOPLOT {
 
 process FILTER_READS {
     tag        { sample_id }
-    label      'qc'
+    label      'qc_light'
     publishDir "${params.outdir}/reads_filtered", mode: 'copy'
     container  'quay.io/biocontainers/filtlong:0.2.1--hdcf5f25_3'
 

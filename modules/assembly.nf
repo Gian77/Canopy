@@ -89,7 +89,11 @@ process ASSEMBLE_ORGANELLES_OATK {
     mkdir -p oatk_${sample_id}
     cd oatk_${sample_id}
 
-    # -k 501: ONT-appropriate overlap size; 1001 (HiFi default) fragments ONT graphs
+    # -k 501: ONT-appropriate overlap size; 1001 (HiFi default) fragments ONT graphs.
+    # A biological sample may contain no recoverable organelle component.
+    # Preserve stderr so that biological no-result can be distinguished from a
+    # genuine Oatk/runtime failure.
+    set +e
     oatk \\
         -k 501 \\
         -c 30 \\
@@ -97,7 +101,17 @@ process ASSEMBLE_ORGANELLES_OATK {
         -m ../${mito_db} \\
         -p ../${pltd_db} \\
         -o ${sample_id} \\
-        ../${reads}
+        ../${reads} 2> >(tee oatk.stderr >&2)
+    oatk_status=\$?
+    set -e
+
+    if [ "\${oatk_status}" -ne 0 ]; then
+        if grep -q 'no organelle component found' oatk.stderr; then
+            echo "OATK found no organelle component; emitting empty assemblies" >&2
+        else
+            exit "\${oatk_status}"
+        fi
+    fi
 
     cd ..
 
@@ -142,4 +156,3 @@ process ASSEMBLE_NUCLEAR {
     cp flye_nuclear_${sample_id}/assembly.fasta ${sample_id}_nuclear.fasta
     """
 }
-

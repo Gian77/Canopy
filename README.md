@@ -8,7 +8,7 @@
 <!-- badges: end -->
 
 <p align="center">
-  <img src=".logo/canopy_logo.png" alt="Canopy logo">
+  <img src=".logo/canopy.png" alt="Canopy logo">
 </p>
 
 ## a nextflow pipeline for plant genome assembly
@@ -62,6 +62,48 @@ For each sample:
     reports, and (when enabled) the blob plot, contamination audit, and Sylph corroboration
     into one small archive
 
+## Workflow DAG
+
+The pipeline follows this dependency graph. Dashed branches are optional and are enabled by
+the corresponding parameters described in [Key parameters](#key-parameters).
+
+```mermaid
+flowchart TB
+    reads[(ONT reads)] --> qc[NanoPlot QC]
+    qc --> filter[Filter reads]
+    filter --> organelle_map[Map to organelles]
+    organelle_map --> partition[Partition cp / mt / nuclear reads]
+
+    partition --> cp[Assemble chloroplast]
+    partition --> mt[Assemble mitochondria]
+    partition --> nuclear[Assemble nuclear genome]
+
+    cp --> cp_polish[Polish and filter chloroplast]
+    mt --> mt_polish[Polish and filter mitochondria]
+    nuclear --> medaka[Medaka polish]
+    medaka --> purge[Purge duplicates]
+    medaka --> scaffold_medaka[Scaffold Medaka assembly]
+    purge --> scaffold_purge[Scaffold purged assembly]
+
+    scaffold_medaka --> compare[QUAST + BUSCO comparison]
+    scaffold_purge --> compare
+    compare --> select[Select final assembly]
+
+    select -. "--run_hapdup" .-> hapdup[HapDup phasing]
+    select -. "--run_kraken2 / --run_blobtools" .-> screening[Contamination screening]
+    screening -. "--flag_contaminants" .-> decontam[Remove flagged contigs]
+    decontam -. "--verify_sylph / --verify_blast" .-> corroborate[Advisory corroboration]
+
+    select --> reports[MultiQC + final summary]
+    cp_polish --> reports
+    mt_polish --> reports
+    corroborate -.-> reports
+    reports --> package[Package results]
+```
+
+For the full process-level DAG from a run, use `nextflow run main.nf -preview` or open the
+`dag.html` generated in the run's output directory.
+
 ## Directory structure expected
 
 ```
@@ -95,7 +137,7 @@ Canopy/
 
 To check the pipeline wires up correctly (channels, params, DAG) without running any process
 or needing real coverage, use `-preview` (see Sanity checks below). For an actual assembly run
-on a small dataset, use a real full sample rather than a subsample — see Test run below for why.
+use the full reads from one real biological sample.
 
 ```bash
 nextflow run main.nf \
@@ -220,6 +262,11 @@ speed/accuracy setting, pick the matching Medaka model instead.
 | `--verify_sylph`        | `false`                                | Advisory ANI corroboration of flagged contigs against GTDB; requires `--flag_contaminants` |
 | `--sylph_db`            | `${projectDir}/databases/sylph/gtdb-r226-c200-dbv1.syldb` | Sylph GTDB sketch database; downloaded automatically if the path is absent |
 | `--sylph_min_ani`       | `90`                                  | Minimum adjusted ANI passed to Sylph query                             |
+| `--verify_blast`        | `false`                               | Advisory BLASTn corroboration; uses remote NCBI BLAST unless `--blast_db` is supplied |
+| `--blast_db`            | `null`                                | Optional directory containing a local NCBI BLAST nucleotide database with prefix `nt` |
+| `--blast_remote`        | `true`                                | Use NCBI remote BLAST when no local database is supplied                       |
+| `--blast_min_identity`  | `90`                                  | Minimum BLASTn percent identity for corroboration                     |
+| `--blast_min_qcov`      | `50`                                  | Minimum BLASTn query coverage percentage for corroboration             |
 | `--outdir`              | `results`                              | Output directory                                                |
 
 > `--skip_purge` is retired — purge_dups always runs now; use `--final_assembly medaka` (equivalent to the old skip behavior) or `--final_assembly purge`.
@@ -236,6 +283,20 @@ Sylph queries only the small set of candidate contigs, while its GTDB sketch dat
 stored under `databases/sylph/` and reused across runs. A Sylph non-match is not treated as
 proof that Kraken2/BlobTools was wrong; short contigs may simply lack enough sequence for a
 confident ANI estimate.
+
+To add BLASTn corroboration using NCBI's remote service, enable:
+
+```bash
+--run_kraken2 true \
+--flag_contaminants true \
+--verify_sylph true \
+--verify_blast true
+```
+
+BLASTn is run only on contigs already flagged by the conservative contamination rule. Its
+results are advisory and are written alongside the Sylph results; neither method changes the
+removal decision. For a reproducible offline run, supply `--blast_db` pointing to a local
+formatted NCBI database with prefix `nt`; remote results reflect the current NCBI database.
 
 ## Resource classes (configured in nextflow.config)
 
@@ -282,30 +343,19 @@ nextflow run main.nf -preview --cp_ref ... --mt_ref ...
 nextflow run main.nf -profile condor --reads ./reads_single_sample ...
 ```
 
-## Test run
+## Full-sample validation
 
-**Do not test with a random read subsample** (e.g. `seqkit sample -n 50000 ...`). De novo
-assembly needs real depth across the whole genome — Flye/purge_dups/scaffolding all expect
-20-30x+ coverage, and a random subsample of a few thousand-to-tens-of-thousands of reads sits
-far below that. It doesn't just make the assembly worse, it typically fails to assemble at all
-or produces a wildly fragmented result that tells you nothing about whether the pipeline itself
-is wired correctly.
-
-To validate the pipeline wiring without spending compute, use `-preview` (see Sanity checks
-above) — it builds the DAG and checks channel wiring without executing any process.
-
-To actually test assembly quality on a fast, cheap run, use a **real but small whole sample**
-(a lower-depth or smaller-genome sample if you have one) rather than a subsample of a large one
-— e.g. `F10702_test/`, a convenience symlink to the full `reads/F10702/` read set:
+Canopy must be run on the complete read set for one real biological sample. Use `-preview`
+(see Sanity checks above) when checking workflow wiring without running assembly.
 
 ```bash
 nextflow run main.nf \
-    --reads $PWD/F10702_test/ \
+    --reads $PWD/reads/F10702/ \
     -profile condor \
     --cp_ref refs/sorghum/sorghum_cp_NC008602.fasta \
     --mt_ref refs/sorghum/sorghum_mt_NC008360.fasta \
-    --outdir results_test \
-    -w /scratch/$USER/nf-work-test
+    --outdir results_F10702 \
+    -w /scratch/$USER/nf-work-F10702
 ```
 
 ## For containers
@@ -386,24 +436,24 @@ See the use of `-resume`, to resume previously cached data.
 ```
 nextflow run main.nf \
 -profile condor \
---reads $PWD/tests \
+--reads $PWD/reads/B11077 \
 --cp_ref refs/sorghum/sorghum_cp_NC008602.fasta \
 --mt_ref refs/sorghum/sorghum_mt_NC008360.fasta \
---outdir results_test \
--w nf-work-test \
+--outdir results_B11077 \
+-w nf-work-B11077 \
 -resume
 ```
 
 Or simply:
 
 ```
-nextflow run main.nf -profile condor --reads $PWD/F10702_test/ --cp_ref $PWD/refs/sorghum/sorghum_cp_NC008602.fasta --mt_ref $PWD/refs/sorghum/sorghum_mt_NC008360.fasta --outdir $PWD/results_F10702 -w $PWD/nf-work-test -resume
+nextflow run main.nf -profile condor --reads $PWD/reads/F10702/ --cp_ref $PWD/refs/sorghum/sorghum_cp_NC008602.fasta --mt_ref $PWD/refs/sorghum/sorghum_mt_NC008360.fasta --outdir $PWD/results_F10702 -w $PWD/nf-work-F10702 -resume
 ```
 
 Using a specific nextflow session:
 
 ```
-nextflow run main.nf -profile condor     --reads /mnt/cephfs/linuxhome/benucci/Canopy/F10702_test/     --cp_ref /mnt/cephfs/linuxhome/benucci/Canopy/refs/sorghum/sorghum_cp_NC008602.fasta     --mt_ref /mnt/cephfs/linuxhome/benucci/Canopy/refs/sorghum/sorghum_mt_NC008360.fasta     --outdir /mnt/cephfs/linuxhome/benucci/Canopy/results_F10702     -w /mnt/cephfs/linuxhome/benucci/Canopy/nf-work-test  --run_hapdup true   -resume <session-uuid>
+nextflow run main.nf -profile condor     --reads /mnt/cephfs/linuxhome/benucci/Canopy/reads/F10702/     --cp_ref /mnt/cephfs/linuxhome/benucci/Canopy/refs/sorghum/sorghum_cp_NC008602.fasta     --mt_ref /mnt/cephfs/linuxhome/benucci/Canopy/refs/sorghum/sorghum_mt_NC008360.fasta     --outdir /mnt/cephfs/linuxhome/benucci/Canopy/results_F10702     -w /mnt/cephfs/linuxhome/benucci/Canopy/nf-work-F10702  --run_hapdup true   -resume <session-uuid>
 ```
 
 
@@ -419,11 +469,11 @@ tmux new -s canopy
 cd /mnt/cephfs/linuxhome/benucci/Canopy
 conda activate nextflow
 nextflow run main.nf -profile condor \
-    --reads $PWD/tests \
+    --reads $PWD/reads/B11077 \
     --cp_ref refs/sorghum/sorghum_cp_NC008602.fasta \
     --mt_ref refs/sorghum/sorghum_mt_NC008360.fasta \
-    --outdir results_test \
-    -w nf-work-test \
+    --outdir results_B11077 \
+    -w nf-work-B11077 \
     -resume
 ```
 
@@ -442,11 +492,11 @@ Simpler but less interactive — no live progress bars to look at:
 
 ```
 nohup nextflow run main.nf -profile condor \
-    --reads $PWD/tests \
+    --reads $PWD/reads/B11077 \
     --cp_ref refs/sorghum/sorghum_cp_NC008602.fasta \
     --mt_ref refs/sorghum/sorghum_mt_NC008360.fasta \
-    --outdir results_test \
-    -w nf-work-test \
+    --outdir results_B11077 \
+    -w nf-work-B11077 \
     -resume \
     > nf.log 2>&1 &
 
@@ -465,13 +515,13 @@ kill $(cat nf.pid)
 cd /mnt/cephfs/linuxhome/benucci/Canopy
 
 # The work directory (cached task outputs — this is the big one)
-rm -rf /mnt/cephfs/linuxhome/benucci/Canopy/nf-work-test/
+rm -rf /mnt/cephfs/linuxhome/benucci/Canopy/nf-work-B11077/
 
 # The .nextflow hidden directory (history, cache metadata, session info)
 rm -rf .nextflow/
 
 # The published results from previous runs (back this up first if you need it)
-rm -rf results_test/
+rm -rf results_B11077/
 
 # Any leftover log files
 rm -f .nextflow.log* nextflow_report*.html timeline*.html trace*.txt

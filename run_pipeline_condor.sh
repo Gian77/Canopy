@@ -28,7 +28,7 @@ RESUME="-resume"
 
 exec "${CONDA_ENV}/bin/nextflow" run "${PROJECT_DIR}/main.nf" \
     -profile condor \
-    --reads F10702_test/ \
+    --reads reads/F10702/ \
     --cp_ref refs/sorghum/sorghum_cp_NC008602.fasta \
     --mt_ref refs/sorghum/sorghum_mt_NC008360.fasta \
     --nuclear_ref refs/sorghum/Sbicolor_730_v5.0.fa \

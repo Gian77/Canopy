@@ -75,7 +75,7 @@ include {ALIGN_TO_ORGANELLES; SORT_INDEX_BAM; EXTRACT_RAW_READSETS; DEDUP_ORGANE
 include {ASSEMBLE_CP_FLYE; ASSEMBLE_MT_FLYE; ASSEMBLE_ORGANELLES_OATK; ASSEMBLE_NUCLEAR} from './modules/assembly.nf'
 include {POLISH_MEDAKA; POLISH_MEDAKA_ORGANELLE; PURGE_DUPS; ALIGN_FOR_HAPDUP; SORT_FOR_HAPDUP; HAPDUP} from './modules/polishing.nf'
 include {RAGTAG_SCAFFOLD; RAGTAG_SCAFFOLD as RAGTAG_PREPURGE} from './modules/scaffolding.nf'
-include {KRAKEN2_CLASSIFY; BLOBTOOLS_TAXONOMY; CLASSIFY_CONTAMINANTS; REMOVE_CONTAMINANTS; EXTRACT_CANDIDATE_CONTIGS; SYLPH_VERIFY_CONTAMINANTS} from './modules/contamination.nf'
+include {KRAKEN2_CLASSIFY; BLOBTOOLS_TAXONOMY; CLASSIFY_CONTAMINANTS; REMOVE_CONTAMINANTS; EXTRACT_CANDIDATE_CONTIGS; SYLPH_VERIFY_CONTAMINANTS; BLAST_VERIFY_CONTAMINANTS} from './modules/contamination.nf'
 include {FINAL_SUMMARY; TOOLS_REPORT; PACKAGE_RESULTS} from './modules/reports.nf'
 
 // ============================================================
@@ -106,6 +106,13 @@ workflow {
     if (params.verify_sylph && !params.flag_contaminants) {
         exit 1, "ERROR: --verify_sylph requires --flag_contaminants (it corroborates the " +
                 "contigs that step already flagged). Enable both, or drop --verify_sylph."
+    }
+    if (params.verify_blast && !params.flag_contaminants) {
+        exit 1, "ERROR: --verify_blast requires --flag_contaminants (it corroborates the " +
+                "contigs that step already flagged). Enable both, or drop --verify_blast."
+    }
+    if (params.verify_blast && !params.blast_db && !params.blast_remote) {
+        exit 1, "ERROR: --verify_blast requires --blast_db or --blast_remote true."
     }
 
     // ---- Banner ----
@@ -138,10 +145,14 @@ workflow {
         : Channel.empty()
 
     // ---- Sample channel ----
+    // Accept either one biological sample directory (reads/SAMPLE/) or a parent
+    // directory containing multiple complete biological samples (reads/).
     raw_reads_ch = Channel
-        .fromPath("${params.reads}/*/*.fastq.gz")
+        .fromPath("${params.reads}/*.fastq.gz")
+        .mix(Channel.fromPath("${params.reads}/*/*.fastq.gz"))
         .map { f -> tuple(f.parent.name, f) }
         .groupTuple()
+        .ifEmpty { error "No FASTQ files found under --reads ${params.reads}" }
 
    // 1. QC + filtering
     NANOPLOT(raw_reads_ch)
@@ -375,6 +386,10 @@ workflow {
                     EXTRACT_CANDIDATE_CONTIGS(nuclear_final.join(CLASSIFY_CONTAMINANTS.out.ids))
                     SYLPH_VERIFY_CONTAMINANTS(EXTRACT_CANDIDATE_CONTIGS.out.fasta, sylph_db_ch)
                 }
+                if (params.verify_blast) {
+                    blast_db_ch = Channel.value(params.blast_db ?: '')
+                    BLAST_VERIFY_CONTAMINANTS(EXTRACT_CANDIDATE_CONTIGS.out.fasta, blast_db_ch)
+                }
             }
         }
     }
@@ -459,6 +474,7 @@ workflow {
         // empty file via remainder:true + null-check, same pattern as blob_ch below.
         contam_summary_ch = params.flag_contaminants ? CLASSIFY_CONTAMINANTS.out.summary : Channel.empty()
         sylph_summary_ch  = params.verify_sylph      ? SYLPH_VERIFY_CONTAMINANTS.out.summary : Channel.empty()
+        blast_summary_ch  = params.verify_blast      ? BLAST_VERIFY_CONTAMINANTS.out.summary : Channel.empty()
 
         // FINAL_SUMMARY picks the final genome's BUSCO from medaka/purge in-script.
         summary_in = nano_stats_ch
@@ -471,10 +487,12 @@ workflow {
             .join(decontam_busco_ch)
             .join(contam_summary_ch, remainder: true)
             .join(sylph_summary_ch, remainder: true)
-            .map { id, nano, quast, cutoffs, calcuts, ragtag, bmed, bpurge, bdecon, contam, sylph ->
+            .join(blast_summary_ch, remainder: true)
+            .map { id, nano, quast, cutoffs, calcuts, ragtag, bmed, bpurge, bdecon, contam, sylph, blast ->
                 tuple(id, nano, quast, cutoffs, calcuts, ragtag, bmed, bpurge, bdecon,
                       contam != null ? contam : [],
-                      sylph  != null ? sylph  : [])
+                      sylph  != null ? sylph  : [],
+                      blast  != null ? blast  : [])
             }
         FINAL_SUMMARY(summary_in)
     }
@@ -503,6 +521,7 @@ workflow {
         decontam_pkg_ch = has_decontam ? decontam_final : Channel.empty()
         contam_audit_ch = has_decontam ? CLASSIFY_CONTAMINANTS.out.audit : Channel.empty()
         sylph_pkg_ch    = params.verify_sylph ? SYLPH_VERIFY_CONTAMINANTS.out.corroboration : Channel.empty()
+        blast_pkg_ch    = params.verify_blast ? BLAST_VERIFY_CONTAMINANTS.out.corroboration : Channel.empty()
 
         package_in = FINAL_SUMMARY.out.summary
             .join(nuclear_final)
@@ -517,15 +536,18 @@ workflow {
             .join(decontam_pkg_ch, remainder: true)
             .join(contam_audit_ch, remainder: true)
             .join(sylph_pkg_ch, remainder: true)
+            .join(blast_pkg_ch, remainder: true)
             .combine(TOOLS_REPORT.out)
-            .map { id, summary, scaffold, agp, cp, mt, qn, qcp, qmt, busco, blob, decontam, audit, sylph, tools ->
+            .map { id, summary, scaffold, agp, cp, mt, qn, qcp, qmt, busco, blob, decontam, audit, sylph, blast, tools ->
                 def hasBlob     = (blob != null)
                 def hasDecontam = (decontam != null)
                 def hasSylph    = (sylph != null)
+                def hasBlast    = (blast != null)
                 tuple(id, summary, tools, scaffold, agp, cp, mt, qn, qcp, qmt, busco,
                       hasBlob ? blob : [], hasBlob,
                       hasDecontam ? decontam : [], hasDecontam ? audit : [], hasDecontam,
-                      hasSylph ? sylph : [], hasSylph)
+                      hasSylph ? sylph : [], hasSylph,
+                      hasBlast ? blast : [], hasBlast)
             }
         PACKAGE_RESULTS(package_in)
     }

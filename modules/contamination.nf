@@ -228,8 +228,11 @@ process EXTRACT_CANDIDATE_CONTIGS {
 process SYLPH_VERIFY_CONTAMINANTS {
     tag           { sample_id }
     label         'qc'
-    errorStrategy 'ignore'
-    publishDir    { "${params.outdir}/qc/contamination/${sample_id}" }, mode: 'copy'
+    // Empty candidate sets and no-match queries are handled successfully in
+    // the script below. A genuine Sylph/runtime failure must remain visible
+    // and prevent publication of a package without corroboration output.
+    errorStrategy 'terminate'
+    publishDir    { "${params.outdir}/qc/contamination/${sample_id}/sylph" }, mode: 'copy'
     container     'quay.io/biocontainers/sylph:0.9.0--ha6fb395_0'
 
     input:
@@ -268,49 +271,121 @@ process SYLPH_VERIFY_CONTAMINANTS {
     sylph query ${sylph_db} sketches/*.sylsp \\
         -m ${min_ani} -t ${task.cpus} -o ${sample}_sylph_query.tsv
 
-    python3 - "${sample}_sylph_query.tsv" "${sample}" "${candidates}" <<'PYEOF'
-import sys, csv, collections
+    # Parse the tab-delimited Sylph output with awk so this process does not
+    # require Python in the Sylph container. Sample_file identifies the query
+    # contig; Contig_name identifies the matched reference contig and must not
+    # be used for attribution. Sylph's -m threshold means every retained row
+    # is already a qualifying corroboration.
+    awk -F '\\t' -v OFS='\\t' '
+        FILENAME == ARGV[1] {
+            if (FNR == 1) {
+                for (i = 1; i <= NF; i++) {
+                    if (\$i == "Sample_file") sample_col = i
+                    if (\$i == "Genome_file") genome_col = i
+                    if (\$i == "Adjusted_ANI") ani_col = i
+                }
+                next
+            }
+            if (!sample_col || !genome_col || !ani_col || \$sample_col == "" || \$ani_col == "") next
 
-query_tsv, sample, candidates_fasta = sys.argv[1:4]
+            contig = \$sample_col
+            sub("^.*/", "", contig)
+            sub(".fasta\$", "", contig)
+            ani = \$ani_col + 0
+            if (!(contig in best_ani) || ani > best_ani[contig]) {
+                best_ani[contig] = ani
+                best_genome[contig] = \$genome_col
+            }
+            next
+        }
 
-all_contigs = []
-with open(candidates_fasta) as fh:
-    for line in fh:
-        if line.startswith('>'):
-            all_contigs.append(line[1:].split()[0])
+        FILENAME == ARGV[2] {
+            if (\$0 ~ /^>/) {
+                contig = substr(\$0, 2)
+                sub(/[[:space:]].*\$/, "", contig)
+                contigs[++n] = contig
+            }
+            next
+        }
 
-best = {}
-try:
-    with open(query_tsv) as fh:
-        reader = csv.DictReader(fh, delimiter='\\t')
-        for row in reader:
-            # Sample_file is 'per_contig/<contig>.fasta' (sylph keeps the sketched
-            # input's basename) — recover the contig id from it, not Contig_name
-            # (that column names the matched REFERENCE genome's contig).
-            sample_file = row.get('Sample_file', '')
-            contig = sample_file.split('/')[-1].removesuffix('.fasta')
-            ani = float(row['Adjusted_ANI'])
-            genome = row.get('Genome_file', 'NA')
-            if contig not in best or ani > best[contig][0]:
-                best[contig] = (ani, genome)
-except FileNotFoundError:
-    pass
+        END {
+            print "contig", "best_ani", "best_match_genome", "corroborated"
+            for (i = 1; i <= n; i++) {
+                contig = contigs[i]
+                if (contig in best_ani)
+                    printf "%s\\t%.2f\\t%s\\tyes\\n", contig, best_ani[contig], best_genome[contig]
+                else
+                    print contig, "NA", "NA", "no"
+            }
+        }
+    ' "${sample}_sylph_query.tsv" "${candidates}" > "${sample}_sylph_corroboration.tsv"
 
-corroborated = 0
-with open(f"{sample}_sylph_corroboration.tsv", 'w') as out:
-    out.write("contig\\tbest_ani\\tbest_match_genome\\tcorroborated\\n")
-    for contig in all_contigs:
-        if contig in best:
-            ani, genome = best[contig]
-            out.write(f"{contig}\\t{ani:.2f}\\t{genome}\\tyes\\n")
-            corroborated += 1
-        else:
-            out.write(f"{contig}\\tNA\\tNA\\tno\\n")
+    corroborated=\$(awk -F '\\t' 'NR > 1 && \$4 == "yes" {n++} END {print n + 0}' "${sample}_sylph_corroboration.tsv")
+    total_candidates=\$(awk -F '\\t' 'NR > 1 {n++} END {print n + 0}' "${sample}_sylph_corroboration.tsv")
+    printf 'sylph_corroborated=%s\\n' "\${corroborated}" > "${sample}_sylph_summary.txt"
+    printf 'sylph_total_candidates=%s\\n' "\${total_candidates}" >> "${sample}_sylph_summary.txt"
+    """
+}
 
-with open(f"{sample}_sylph_summary.txt", 'w') as s:
-    s.write(f"sylph_corroborated={corroborated}\\n")
-    s.write(f"sylph_total_candidates={len(all_contigs)}\\n")
-PYEOF
+// Advisory nucleotide-level corroboration for the same flagged candidates checked by Sylph.
+// The database is deliberately supplied by the user (typically a locally formatted NCBI nt
+// database) so results are reproducible and the five-genome run does not depend on live NCBI
+// rate limits or an undocumented remote database version. BLAST evidence never changes removal.
+process BLAST_VERIFY_CONTAMINANTS {
+    tag           { sample_id }
+    label         'qc'
+    errorStrategy 'terminate'
+    publishDir    { "${params.outdir}/qc/contamination/${sample_id}/blast" }, mode: 'copy'
+    container     'quay.io/biocontainers/blast:2.15.0--pl5321h6f7f691_1'
+
+    input:
+    tuple val(sample_id), path(candidates)
+    val blast_db_dir
+
+    output:
+    tuple val(sample_id), path("${sample_id}_blast_corroboration.tsv"), emit: corroboration
+    tuple val(sample_id), path("${sample_id}_blast_summary.txt"),       emit: summary
+
+    script:
+    def sample = sample_id
+    def min_id = params.blast_min_identity
+    def min_qc = params.blast_min_qcov
+    def max_t  = params.blast_max_targets
+    def blast_target = blast_db_dir ? "-db ${blast_db_dir}/nt" : '-db nt -remote'
+    def thread_args = blast_db_dir ? "-num_threads ${task.cpus}" : ''
+    """
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ ! -s ${candidates} ]; then
+        printf 'contig\\tbest_identity\\tbest_qcov\\tbest_subject\\tbest_title\\tevalue\\tbitscore\\tcorroborated\\n' > ${sample}_blast_corroboration.tsv
+        echo 'blast_corroborated=0' > ${sample}_blast_summary.txt
+        echo 'blast_total_candidates=0' >> ${sample}_blast_summary.txt
+        exit 0
+    fi
+
+    blastn -query ${candidates} ${blast_target} \\
+        ${thread_args} -max_target_seqs ${max_t} \\
+        -evalue 1e-5 -outfmt '6 qseqid sacc stitle pident length qlen evalue bitscore' \\
+        -out ${sample}_blast_query.tsv
+
+    # Select the highest-bitscore hit per query. A hit corroborates the candidate only
+    # when both identity and query coverage meet explicit thresholds.
+    awk -F '\\t' -v OFS='\\t' -v minid=${min_id} -v minqc=${min_qc} \\
+        'BEGIN { print "contig", "best_identity", "best_qcov", "best_subject", "best_title", "evalue", "bitscore", "corroborated" }
+         FILENAME == ARGV[1] { q=\$1; qcov=100*\$5/\$6; if (!(q in best) || \$8 > best[q]) {
+             best[q]=\$8; pid[q]=\$4; cov[q]=qcov; sid[q]=\$2; title[q]=\$3; ev[q]=\$7
+         }}
+         FILENAME == ARGV[2] && /^>/ { q=substr(\$1,2); sub(/[[:space:]].*\$/, "", q); contigs[++n]=q }
+         END { for (i=1; i<=n; i++) { q=contigs[i]; if (q in best)
+                    printf "%s\\t%.2f\\t%.2f\\t%s\\t%s\\t%s\\t%s\\t%s\\n", q,pid[q],cov[q],sid[q],title[q],ev[q],best[q],(pid[q]>=minid && cov[q]>=minqc ? "yes" : "no")
+                else print q, "NA", "NA", "NA", "NA", "NA", "NA", "no" } }' \\
+        ${sample}_blast_query.tsv ${candidates} >> ${sample}_blast_corroboration.tsv
+
+    total=\$(awk 'NR > 1 {n++} END {print n+0}' ${sample}_blast_corroboration.tsv)
+    corroborated=\$(awk -F '\\t' 'NR > 1 && \$8 == "yes" {n++} END {print n+0}' ${sample}_blast_corroboration.tsv)
+    printf 'blast_corroborated=%s\\n' "\${corroborated}" > ${sample}_blast_summary.txt
+    printf 'blast_total_candidates=%s\\n' "\${total}" >> ${sample}_blast_summary.txt
     """
 }
 

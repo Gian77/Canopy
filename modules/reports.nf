@@ -22,7 +22,8 @@ process FINAL_SUMMARY {
           path(busco_purge,     stageAs: 'busco_purge_summary.txt'),
           path(busco_decontam,  stageAs: 'busco_decontam_summary.txt'),
           path(contam_summary,  stageAs: 'contam_summary.txt'),
-          path(sylph_summary,   stageAs: 'sylph_summary.txt')
+          path(sylph_summary,   stageAs: 'sylph_summary.txt'),
+          path(blast_summary,   stageAs: 'blast_summary.txt')
 
     output:
     tuple val(sample_id), path("${sample_id}_assembly_summary.md"), emit: summary
@@ -36,6 +37,8 @@ process FINAL_SUMMARY {
     def taxo_screened = params.run_kraken2
     def decontam_ran  = params.flag_contaminants
     def sylph_ran     = params.verify_sylph
+    def blast_ran     = params.verify_blast
+    def blast_source  = params.blast_db ? 'supplied local NCBI BLAST database' : 'NCBI remote BLAST service'
     """
     #!/usr/bin/env bash
     set -uo pipefail
@@ -47,6 +50,7 @@ process FINAL_SUMMARY {
     BUSCO_DECONTAM="busco_decontam_summary.txt"
     CONTAM_SUMMARY="contam_summary.txt"
     SYLPH_SUMMARY="sylph_summary.txt"
+    BLAST_SUMMARY="blast_summary.txt"
     # Headline BUSCO = the published final genome's (default medaka).
     if [ "${final_asm}" = "purge" ]; then BUSCO="\$BUSCO_PURGE"; else BUSCO="\$BUSCO_MEDAKA"; fi
     CUTOFFS="${purge_cutoffs}"
@@ -155,6 +159,8 @@ process FINAL_SUMMARY {
     # Sylph corroboration counts (only meaningful when sylph_ran).
     SYLPH_CORROBORATED=\$(grep '^sylph_corroborated='      "\$SYLPH_SUMMARY" 2>/dev/null | cut -d= -f2 || echo 0)
     SYLPH_TOTAL=\$(grep '^sylph_total_candidates='         "\$SYLPH_SUMMARY" 2>/dev/null | cut -d= -f2 || echo 0)
+    BLAST_CORROBORATED=\$(grep '^blast_corroborated='      "\$BLAST_SUMMARY" 2>/dev/null | cut -d= -f2 || echo 0)
+    BLAST_TOTAL=\$(grep '^blast_total_candidates='         "\$BLAST_SUMMARY" 2>/dev/null | cut -d= -f2 || echo 0)
 
     PEAK=\$(grep "autotune" "\$CALCUTS" 2>/dev/null | grep -o 'Peak: [0-9]*x' | grep -o '[0-9]*' || echo "unknown")
 
@@ -367,6 +373,9 @@ process FINAL_SUMMARY {
           if [ "${sylph_ran}" = "true" ]; then
               echo "| Sylph-corroborated (independent ANI vs GTDB) | \$SYLPH_CORROBORATED / \$SYLPH_TOTAL |"
           fi
+          if [ "${blast_ran}" = "true" ]; then
+              echo "| BLASTn-corroborated (identity + query coverage) | \$BLAST_CORROBORATED / \$BLAST_TOTAL |"
+          fi
           echo
           echo "> **Interpretation:** \$CONTAM_FLAGGED contigs (\${CONTAM_MB} Mb) were flagged as" \
                "contaminant -- simultaneously non-${params.contam_target_phylum} by BlobTools," \
@@ -384,6 +393,14 @@ process FINAL_SUMMARY {
                    "Note: short contigs (a few kb) may show 'no' simply because there isn't" \
                    "enough sequence for a confident ANI estimate at Sylph's default sketch" \
                    "density -- that is not the same as Sylph actively disagreeing with Kraken2."
+          fi
+          if [ "${blast_ran}" = "true" ]; then
+              echo
+              echo "> BLASTn corroboration: \$BLAST_CORROBORATED of \$BLAST_TOTAL flagged contigs" \
+                   "met the configured identity (>=${params.blast_min_identity}%) and query-coverage" \
+                   "(>=${params.blast_min_qcov}%) thresholds against the ${blast_source}." \
+                   "This is advisory only and did not change what was removed. See" \
+                   "qc/contamination/*/blast/ for per-hit details."
           fi
           echo
       fi
@@ -458,7 +475,9 @@ process PACKAGE_RESULTS {
           path(contam_audit,   stageAs: 'contamination_audit.tsv'),
           val(has_decontam),
           path(sylph_corroboration, stageAs: 'sylph_corroboration.tsv'),
-          val(has_sylph)
+          val(has_sylph),
+          path(blast_corroboration, stageAs: 'blast_corroboration.tsv'),
+          val(has_blast)
 
     output:
     tuple val(sample_id), path("${sample_id}_final_package.zip"), emit: zip
@@ -493,6 +512,10 @@ process PACKAGE_RESULTS {
         cp sylph_corroboration.tsv   "\$PKG/${sample_id}_sylph_corroboration.tsv"
     fi
 
+    if [ "${has_blast}" = "true" ]; then
+        cp blast_corroboration.tsv   "\$PKG/${sample_id}_blast_corroboration.tsv"
+    fi
+
     cat > "\$PKG/README.txt" << 'EOF'
 ${sample_id} -- final results package
 ======================================
@@ -516,7 +539,7 @@ EOF
 }
 
 process TOOLS_REPORT {
-    label         'qc'
+    label         'qc_light'
     errorStrategy 'ignore'
     publishDir    "${params.outdir}/reports", mode: 'copy'
     container     'quay.io/biocontainers/multiqc:1.25.1--pyhdfd78af_0'
