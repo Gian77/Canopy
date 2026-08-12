@@ -65,40 +65,113 @@ For each sample:
 ## Workflow DAG
 
 The pipeline follows this dependency graph. Dashed branches are optional and are enabled by
-the corresponding parameters described in [Key parameters](#key-parameters).
+the corresponding parameters described in [Key parameters](#key-parameters). BUSCO and nuclear
+QUAST run after candidate generation, scaffolding, and optional contamination removal so that
+all candidate genomes can be compared consistently.
 
 ```mermaid
-flowchart TB
-    reads[(ONT reads)] --> qc[NanoPlot QC]
-    qc --> filter[Filter reads]
-    filter --> organelle_map[Map to organelles]
-    organelle_map --> partition[Partition cp / mt / nuclear reads]
+flowchart LR
+    classDef input fill:#E8F1FF,stroke:#356AE6,color:#102A56
+    classDef process fill:#EAF7F2,stroke:#21865B,color:#123B2A
+    classDef qc fill:#FFF4D6,stroke:#C98A00,color:#513600
+    classDef optional fill:#F4EAFE,stroke:#8B5BC7,color:#321A52,stroke-dasharray: 5 5
+    classDef output fill:#FFE9E9,stroke:#C94C4C,color:#541919
 
-    partition --> cp[Assemble chloroplast]
-    partition --> mt[Assemble mitochondria]
-    partition --> nuclear[Assemble nuclear genome]
+    reads[(ONT reads)]:::input --> nano[NANOPLOT]:::qc
+    reads --> filter[FILTER_READS]:::process
+    filter --> align_org[ALIGN_TO_ORGANELLES]:::process
+    align_org --> sort_org[SORT_INDEX_BAM]:::process
+    sort_org --> extract[EXTRACT_RAW_READSETS]:::process
+    extract --> dedup[DEDUP_ORGANELLE_READS]:::process
+    dedup --> stats[READSET_STATS]:::qc
 
-    cp --> cp_polish[Polish and filter chloroplast]
-    mt --> mt_polish[Polish and filter mitochondria]
-    nuclear --> medaka[Medaka polish]
-    medaka --> purge[Purge duplicates]
-    medaka --> scaffold_medaka[Scaffold Medaka assembly]
-    purge --> scaffold_purge[Scaffold purged assembly]
+    subgraph organelles[Organelle assemblies]
+        direction TB
+        dedup --> flye_cp[ASSEMBLE_CP_FLYE]:::process
+        dedup --> flye_mt[ASSEMBLE_MT_FLYE]:::process
+        filter -. "--organelle_assembler oatk" .-> oatk[ASSEMBLE_ORGANELLES_OATK]:::optional
+        oatk_db[FETCH_OATKDB]:::optional -.-> oatk
+        oatk --> bandage[BANDAGE_IMAGE]:::optional
+        flye_cp --> org_filter[FILTER_ORGANELLE_CONTIGS]:::process
+        flye_mt --> org_filter
+        oatk --> org_filter
+        org_filter --> org_polish[POLISH_MEDAKA_ORGANELLE]:::process
+        dedup --> org_polish
+        org_polish --> org_quast[QUAST_ORGANELLE<br/>(cp + mt)]:::qc
+    end
 
-    scaffold_medaka --> compare[QUAST + BUSCO comparison]
-    scaffold_purge --> compare
-    compare --> select[Select final assembly]
+    extract --> nuclear_asm[ASSEMBLE_NUCLEAR]:::process
+    nuclear_asm --> medaka[POLISH_MEDAKA]:::process
+    extract --> purge[PURGE_DUPS<br/>(always)]:::process
+    medaka --> purge
 
-    select -. "--run_hapdup" .-> hapdup[HapDup phasing]
-    select -. "--run_kraken2 / --run_blobtools" .-> screening[Contamination screening]
-    screening -. "--flag_contaminants" .-> decontam[Remove flagged contigs]
-    decontam -. "--verify_sylph / --verify_blast" .-> corroborate[Advisory corroboration]
+    purge -. "--run_hapdup" .-> hap_align[ALIGN_FOR_HAPDUP]:::optional
+    extract -. "nuclear reads" .-> hap_align
+    hap_align --> hap_sort[SORT_FOR_HAPDUP]:::optional
+    hap_sort --> hapdup[HAPDUP]:::optional
 
-    select --> reports[MultiQC + final summary]
-    cp_polish --> reports
-    mt_polish --> reports
-    corroborate -.-> reports
-    reports --> package[Package results]
+    medaka -. "--nuclear_ref" .-> ragtag_m[RAGTAG_PREPURGE<br/>(Medaka)]:::optional
+    purge -. "--nuclear_ref" .-> ragtag_p[RAGTAG_SCAFFOLD<br/>(purge-dups)]:::optional
+
+    medaka --> final{Select final assembly<br/>--final_assembly}:::process
+    purge --> final
+    ragtag_m -.-> final
+    ragtag_p -.-> final
+
+    final --> qc_align[ALIGN_FOR_QC]:::qc
+    extract -. "nuclear reads" .-> qc_align
+    qc_align --> qc_sort[SORT_FOR_QC]:::qc
+    qc_sort -. "--run_qualimap" .-> qualimap[QUALIMAP_BAMQC]:::optional
+    qc_sort -. "--run_blobtools / --run_kraken2" .-> primary[FILTER_PRIMARY_BAM]:::optional
+    primary -. "--run_blobtools" .-> blob_cov[BLOBTOOLS_COVERAGE]:::optional
+    primary -. "--run_kraken2" .-> kraken[KRAKEN2_CLASSIFY]:::optional
+    kraken_db[FETCH_KRAKEN2_PLUSPFP]:::optional -.-> kraken
+    kraken --> blob_tax[BLOBTOOLS_TAXONOMY]:::optional
+    final -. "--flag_contaminants" .-> classify[CLASSIFY_CONTAMINANTS]:::optional
+    blob_tax --> classify
+    classify --> remove[REMOVE_CONTAMINANTS]:::optional
+    final --> remove
+    remove -. "flagged candidates" .-> candidate[EXTRACT_CANDIDATE_CONTIGS]:::optional
+    candidate -. "--verify_sylph" .-> sylph[SYLPH_VERIFY_CONTAMINANTS]:::optional
+    candidate -. "--verify_blast" .-> blast[BLAST_VERIFY_CONTAMINANTS]:::optional
+    sylph_db[FETCH_SYLPH_GTDB]:::optional -.-> sylph
+
+    medaka --> busco[BUSCO_NUCLEAR<br/>Medaka + purge-dups<br/>+ decontam when enabled]:::qc
+    purge --> busco
+    remove -. "--flag_contaminants" .-> busco
+
+    nuclear_asm --> quast[QUAST_NUCLEAR<br/>Flye + Medaka + Medaka scaffold<br/>+ purge + purge scaffold<br/>+ decontam + reference]:::qc
+    medaka --> quast
+    purge --> quast
+    ragtag_m -.-> quast
+    ragtag_p -.-> quast
+    remove -. "--flag_contaminants" .-> quast
+
+    nano --> multiqc[MULTIQC]:::qc
+    stats --> multiqc
+    busco --> multiqc
+    quast --> multiqc
+    org_quast --> multiqc
+    purge --> multiqc
+    qualimap -.-> multiqc
+
+    final --> summary[FINAL_SUMMARY]:::output
+    busco --> summary
+    quast --> summary
+    nano --> summary
+    ragtag_m -.-> summary
+    ragtag_p -.-> summary
+    sylph -.-> summary
+    blast -.-> summary
+    tools[TOOLS_REPORT]:::output --> package[PACKAGE_RESULTS]:::output
+    summary --> package
+    org_quast --> package
+    busco --> package
+    quast --> package
+    blob_tax -.-> package
+    remove -.-> package
+    sylph -.-> package
+    blast -.-> package
 ```
 
 For the full process-level DAG from a run, use `nextflow run main.nf -preview` or open the
@@ -321,14 +394,6 @@ Adjust to your cluster's queue limits and node capacity.
 - **`work/` directory MUST be on scratch** — assembly intermediates are 100s of GB. Use `-w /scratch/$USER/nf-work-canopy`.
 - **Apptainer install required** — install via `conda install -c conda-forge apptainer -y` in the Nextflow env.
 - **First run downloads several container images** — takes 10–20 min, cached in `~/.apptainer_cache`.
-
-## What's NOT yet included (Phase 3+)
-
-- Merqury QV estimation
-- Organelle annotation (GeSeq / PGA)
-- Chloroplast rotation/circularization (start-position normalization)
-- Illumina polishing (Pilon)
-- Variant calling against reference
 
 ## Sanity checks before running
 
