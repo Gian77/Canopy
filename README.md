@@ -97,12 +97,12 @@ flowchart LR
         oatk --> org_filter
         org_filter --> org_polish[POLISH_MEDAKA_ORGANELLE]:::process
         dedup --> org_polish
-        org_polish --> org_quast[QUAST_ORGANELLE<br/>(cp + mt)]:::qc
+        org_polish --> org_quast["QUAST_ORGANELLE<br/>(cp + mt)"]:::qc
     end
 
     extract --> nuclear_asm[ASSEMBLE_NUCLEAR]:::process
     nuclear_asm --> medaka[POLISH_MEDAKA]:::process
-    extract --> purge[PURGE_DUPS<br/>(always)]:::process
+    extract --> purge["PURGE_DUPS<br/>(always)"]:::process
     medaka --> purge
 
     purge -. "--run_hapdup" .-> hap_align[ALIGN_FOR_HAPDUP]:::optional
@@ -110,10 +110,10 @@ flowchart LR
     hap_align --> hap_sort[SORT_FOR_HAPDUP]:::optional
     hap_sort --> hapdup[HAPDUP]:::optional
 
-    medaka -. "--nuclear_ref" .-> ragtag_m[RAGTAG_PREPURGE<br/>(Medaka)]:::optional
-    purge -. "--nuclear_ref" .-> ragtag_p[RAGTAG_SCAFFOLD<br/>(purge-dups)]:::optional
+    medaka -. "--nuclear_ref" .-> ragtag_m["RAGTAG_PREPURGE<br/>(Medaka)"]:::optional
+    purge -. "--nuclear_ref" .-> ragtag_p["RAGTAG_SCAFFOLD<br/>(purge-dups)"]:::optional
 
-    medaka --> final{Select final assembly<br/>--final_assembly}:::process
+    medaka --> final{"Select final assembly<br/>--final_assembly"}:::process
     purge --> final
     ragtag_m -.-> final
     ragtag_p -.-> final
@@ -136,11 +136,11 @@ flowchart LR
     candidate -. "--verify_blast" .-> blast[BLAST_VERIFY_CONTAMINANTS]:::optional
     sylph_db[FETCH_SYLPH_GTDB]:::optional -.-> sylph
 
-    medaka --> busco[BUSCO_NUCLEAR<br/>Medaka + purge-dups<br/>+ decontam when enabled]:::qc
+    medaka --> busco["BUSCO_NUCLEAR<br/>Medaka + purge-dups<br/>+ decontam when enabled"]:::qc
     purge --> busco
     remove -. "--flag_contaminants" .-> busco
 
-    nuclear_asm --> quast[QUAST_NUCLEAR<br/>Flye + Medaka + Medaka scaffold<br/>+ purge + purge scaffold<br/>+ decontam + reference]:::qc
+    nuclear_asm --> quast["QUAST_NUCLEAR<br/>Flye + Medaka + Medaka scaffold<br/>+ purge + purge scaffold<br/>+ decontam + reference"]:::qc
     medaka --> quast
     purge --> quast
     ragtag_m -.-> quast
