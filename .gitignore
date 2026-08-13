@@ -13,6 +13,10 @@ results_*/
 # ---- Cluster run logs ----
 condor_logs/
 
+# ---- Local Condor launchers ----
+pipeline_B11077_sylph.condor
+run_B11077_sylph_condor.sh
+
 # ---- Local agent / editor state ----
 .claude/
 CLAUDE.md

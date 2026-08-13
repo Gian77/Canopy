@@ -18,6 +18,7 @@ process FINAL_SUMMARY {
     // flagging didn't run — see main.nf's decontam_busco_ch/contam_summary_ch.
     tuple val(sample_id), path(nanostats), path(quast_nuclear),
           path(purge_cutoffs), path(purge_calcuts_log), path(ragtag_stats),
+          path(quast_chloroplast), path(quast_mitochondria),
           path(busco_medaka,    stageAs: 'busco_medaka_summary.txt'),
           path(busco_purge,     stageAs: 'busco_purge_summary.txt'),
           path(busco_decontam,  stageAs: 'busco_decontam_summary.txt'),
@@ -45,6 +46,8 @@ process FINAL_SUMMARY {
 
     NANO="${nanostats}"
     QUAST="${quast_nuclear}/report.tsv"
+    QUAST_CP="${quast_chloroplast}/report.tsv"
+    QUAST_MT="${quast_mitochondria}/report.tsv"
     BUSCO_MEDAKA="busco_medaka_summary.txt"
     BUSCO_PURGE="busco_purge_summary.txt"
     BUSCO_DECONTAM="busco_decontam_summary.txt"
@@ -73,6 +76,14 @@ process FINAL_SUMMARY {
             NR==1 { printf "| Metric |"; for(i=2;i<=NF;i++) printf " **%s** |", \$i; print "";
                     printf "|---|";       for(i=2;i<=NF;i++) printf "---|";           print "" }
         ' "\$QUAST" 2>/dev/null
+    }
+
+    orgrow() {
+        awk -F'\t' -v m="\$1" '\$1==m { printf "| **%s** |", \$1; for(i=2;i<=NF;i++) printf " %s |", \$i; print ""; exit }' "\$2" 2>/dev/null
+    }
+
+    orgheader() {
+        awk -F'\t' 'NR==1 { printf "| Metric |"; for(i=2;i<=NF;i++) printf " **%s** |", \$i; print ""; printf "|---|"; for(i=2;i<=NF;i++) printf "---|"; print "" }' "\$1" 2>/dev/null
     }
 
     # ── helper: extract single QUAST cell by metric + column-header pattern ─
@@ -286,8 +297,34 @@ process FINAL_SUMMARY {
       echo "> **Interpretation:** \$(read_interp)"
       echo
 
-      # ── 2. Nuclear assembly progression ──────────────────────────────────
-      echo "## 2. Nuclear assembly progression (QUAST)"
+      # ── 2. Organelle assemblies ──────────────────────────────────────────
+      echo "## 2. Organelle assemblies (QUAST)"
+      echo
+      echo "Organelle assemblies were filtered against the supplied references and polished with Medaka before evaluation."
+      echo
+      echo "### Chloroplast"
+      echo
+      orgheader "\$QUAST_CP"
+      orgrow "# contigs (>= 0 bp)" "\$QUAST_CP"
+      orgrow "Total length (>= 0 bp)" "\$QUAST_CP"
+      orgrow "Largest contig" "\$QUAST_CP"
+      orgrow "N50" "\$QUAST_CP"
+      orgrow "Genome fraction (%)" "\$QUAST_CP"
+      orgrow "# misassemblies" "\$QUAST_CP"
+      echo
+      echo "### Mitochondria"
+      echo
+      orgheader "\$QUAST_MT"
+      orgrow "# contigs (>= 0 bp)" "\$QUAST_MT"
+      orgrow "Total length (>= 0 bp)" "\$QUAST_MT"
+      orgrow "Largest contig" "\$QUAST_MT"
+      orgrow "N50" "\$QUAST_MT"
+      orgrow "Genome fraction (%)" "\$QUAST_MT"
+      orgrow "# misassemblies" "\$QUAST_MT"
+      echo
+
+      # ── 3. Nuclear assembly progression ──────────────────────────────────
+      echo "## 3. Nuclear assembly progression (QUAST)"
       echo
       qheader
       qrow "# contigs"
@@ -302,8 +339,8 @@ process FINAL_SUMMARY {
       echo "> **Interpretation:** \$(assembly_interp)"
       echo
 
-      # ── 3. Purge_dups decision ────────────────────────────────────────────
-      echo "## 3. Haplotig removal decision (purge_dups vs Medaka)"
+      # ── 4. Haplotig removal decision ──────────────────────────────────────
+      echo "## 4. Haplotig removal decision (purge_dups vs Medaka)"
       echo
       echo "Purge_dups always runs; both the Medaka and purged genomes are scaffolded and compared."
       echo "**Final assembly adopted: ${final_asm}.**"
@@ -331,8 +368,8 @@ process FINAL_SUMMARY {
       echo "> haplotigs. Medaka is the default final; pass --final_assembly purge to adopt the purged genome."
       echo
 
-      # ── 4. Scaffolding ────────────────────────────────────────────────────
-      echo "## 4. Chromosomal scaffolding (RagTag)"
+      # ── 5. Chromosomal scaffolding ────────────────────────────────────────
+      echo "## 5. Chromosomal scaffolding (RagTag)"
       echo
       echo "| | Sequences | Bases |"
       echo "|---|---|---|"
@@ -348,8 +385,8 @@ process FINAL_SUMMARY {
       echo "> **Interpretation:** \$(scaffold_interp)"
       echo
 
-      # ── 5. BUSCO ──────────────────────────────────────────────────────────
-      echo "## 5. Gene space completeness (BUSCO — ${busco_lin})"
+      # ── 6. BUSCO (nuclear genome) ─────────────────────────────────────────
+      echo "## 6. Nuclear gene-space completeness (BUSCO — ${busco_lin})"
       echo
       echo '```'
       grep -E "C:|Complete|Fragmented|Missing|Total BUSCO" "\$BUSCO" 2>/dev/null | sed 's/^[[:space:]]*//' || echo "NA"
@@ -360,7 +397,7 @@ process FINAL_SUMMARY {
 
       # ── 6. Contaminant screening (only when --flag_contaminants ran) ───────
       if [ "${decontam_ran}" = "true" ]; then
-          echo "## 6. Contaminant screening (BlobTools + RagTag + GC)"
+          echo "## 7. Contaminant screening (BlobTools + RagTag + GC)"
           echo
           echo "| Metric | Value |"
           echo "|---|---|"
@@ -468,7 +505,7 @@ process PACKAGE_RESULTS {
           path(quast_nuclear_dir),
           path(quast_cp_dir),
           path(quast_mt_dir),
-          path(busco_summary,  stageAs: 'busco_final_summary.txt'),
+          path(busco_summary,  stageAs: 'busco_nuclear_final_summary.txt'),
           path(blob_pngs),
           val(has_blobplots),
           path(decontam_fasta, stageAs: 'decontam.fasta'),
@@ -496,7 +533,7 @@ process PACKAGE_RESULTS {
     cp ${quast_nuclear_dir}/report.html "\$PKG/quast_nuclear_report.html"
     cp ${quast_cp_dir}/report.html      "\$PKG/quast_chloroplast_report.html"
     cp ${quast_mt_dir}/report.html      "\$PKG/quast_mitochondria_report.html"
-    cp busco_final_summary.txt          "\$PKG/busco_final_summary.txt"
+    cp busco_nuclear_final_summary.txt  "\$PKG/busco_nuclear_final_summary.txt"
 
     if [ "${has_blobplots}" = "true" ]; then
         mkdir -p "\$PKG/blobtools"
@@ -528,7 +565,7 @@ ${sample_id}_nuclear_scaffold.agp   -- maps every sequence to the reference chro
                                        or shows it under its own contig name if unplaced.
 ${sample_id}_chloroplast.fasta, ${sample_id}_mitochondria.fasta -- organelle genomes
 quast_*_report.html                 -- open in a browser; self-contained, no other files needed
-busco_final_summary.txt             -- gene-space completeness for the published final genome
+busco_nuclear_final_summary.txt     -- nuclear gene-space completeness for the published final genome
 blobtools/ (if present)             -- contamination-screen blob plot(s); "_unplaced" in the
                                        filename means only contigs RagTag could NOT place on a
                                        reference chromosome were screened (see assembly summary).

@@ -70,108 +70,130 @@ QUAST run after candidate generation, scaffolding, and optional contamination re
 all candidate genomes can be compared consistently.
 
 ```mermaid
-flowchart LR
+flowchart TB
     classDef input fill:#E8F1FF,stroke:#356AE6,color:#102A56
     classDef process fill:#EAF7F2,stroke:#21865B,color:#123B2A
     classDef qc fill:#FFF4D6,stroke:#C98A00,color:#513600
     classDef optional fill:#F4EAFE,stroke:#8B5BC7,color:#321A52,stroke-dasharray: 5 5
     classDef output fill:#FFE9E9,stroke:#C94C4C,color:#541919
+    classDef decision fill:#FFF0D9,stroke:#D47700,color:#533000
 
-    reads[(ONT reads)]:::input --> nano[NANOPLOT]:::qc
+    reads[(ONT reads)]:::input --> read_qc[NANOPLOT]:::qc
     reads --> filter[FILTER_READS]:::process
-    filter --> align_org[ALIGN_TO_ORGANELLES]:::process
-    align_org --> sort_org[SORT_INDEX_BAM]:::process
-    sort_org --> extract[EXTRACT_RAW_READSETS]:::process
-    extract --> dedup[DEDUP_ORGANELLE_READS]:::process
-    dedup --> stats[READSET_STATS]:::qc
 
-    subgraph organelles[Organelle assemblies]
+    subgraph preprocessing["1. Read preprocessing and partitioning"]
         direction TB
-        dedup --> flye_cp[ASSEMBLE_CP_FLYE]:::process
-        dedup --> flye_mt[ASSEMBLE_MT_FLYE]:::process
+        filter --> align_org[ALIGN_TO_ORGANELLES]:::process
+        align_org --> sort_org[SORT_INDEX_BAM]:::process
+        sort_org --> extract[EXTRACT_RAW_READSETS]:::process
+        extract --> dedup[DEDUP_ORGANELLE_READS]:::process
+        dedup --> stats[READSET_STATS]:::qc
+    end
+
+    subgraph organelles["2. Organelle assembly and QC"]
+        direction TB
+        dedup --> cp_asm[ASSEMBLE_CP_FLYE]:::process
+        dedup --> mt_asm[ASSEMBLE_MT_FLYE]:::process
         filter -. "--organelle_assembler oatk" .-> oatk[ASSEMBLE_ORGANELLES_OATK]:::optional
         oatk_db[FETCH_OATKDB]:::optional -.-> oatk
         oatk --> bandage[BANDAGE_IMAGE]:::optional
-        flye_cp --> org_filter[FILTER_ORGANELLE_CONTIGS]:::process
-        flye_mt --> org_filter
+        cp_asm --> org_filter[FILTER_ORGANELLE_CONTIGS]:::process
+        mt_asm --> org_filter
         oatk --> org_filter
         org_filter --> org_polish[POLISH_MEDAKA_ORGANELLE]:::process
         dedup --> org_polish
-        org_polish --> org_quast["QUAST_ORGANELLE<br/>(cp + mt)"]:::qc
+        org_polish --> org_quast["QUAST_ORGANELLE<br/>chloroplast + mitochondria"]:::qc
     end
 
-    extract --> nuclear_asm[ASSEMBLE_NUCLEAR]:::process
-    nuclear_asm --> medaka[POLISH_MEDAKA]:::process
-    extract --> purge["PURGE_DUPS<br/>(always)"]:::process
-    medaka --> purge
+    subgraph nuclear["3. Nuclear assembly candidates"]
+        direction TB
+        extract --> flye[ASSEMBLE_NUCLEAR]:::process
+        flye --> medaka[POLISH_MEDAKA]:::process
+        medaka --> purge["PURGE_DUPS<br/>always runs"]:::process
+        medaka --> medaka_candidate[Medaka candidate]:::process
+        purge --> purge_candidate[purge-dups candidate]:::process
+    end
 
-    purge -. "--run_hapdup" .-> hap_align[ALIGN_FOR_HAPDUP]:::optional
-    extract -. "nuclear reads" .-> hap_align
-    hap_align --> hap_sort[SORT_FOR_HAPDUP]:::optional
-    hap_sort --> hapdup[HAPDUP]:::optional
+    subgraph phasing["Optional phasing branch"]
+        direction TB
+        purge -. "--run_hapdup" .-> hap_align[ALIGN_FOR_HAPDUP]:::optional
+        extract -. "nuclear reads" .-> hap_align
+        hap_align --> hap_sort[SORT_FOR_HAPDUP]:::optional
+        hap_sort --> hapdup[HAPDUP]:::optional
+    end
 
-    medaka -. "--nuclear_ref" .-> ragtag_m["RAGTAG_PREPURGE<br/>(Medaka)"]:::optional
-    purge -. "--nuclear_ref" .-> ragtag_p["RAGTAG_SCAFFOLD<br/>(purge-dups)"]:::optional
+    subgraph scaffolding["Optional reference scaffolding"]
+        direction TB
+        medaka_candidate -. "--nuclear_ref" .-> ragtag_m["RAGTAG_PREPURGE<br/>Medaka scaffold"]:::optional
+        purge_candidate -. "--nuclear_ref" .-> ragtag_p["RAGTAG_SCAFFOLD<br/>purge-dups scaffold"]:::optional
+    end
 
-    medaka --> final{"Select final assembly<br/>--final_assembly"}:::process
-    purge --> final
-    ragtag_m -.-> final
-    ragtag_p -.-> final
+    medaka_candidate --> select{"Select final assembly<br/>--final_assembly"}:::decision
+    purge_candidate --> select
+    ragtag_m -.-> select
+    ragtag_p -.-> select
 
-    final --> qc_align[ALIGN_FOR_QC]:::qc
-    extract -. "nuclear reads" .-> qc_align
-    qc_align --> qc_sort[SORT_FOR_QC]:::qc
-    qc_sort -. "--run_qualimap" .-> qualimap[QUALIMAP_BAMQC]:::optional
-    qc_sort -. "--run_blobtools / --run_kraken2" .-> primary[FILTER_PRIMARY_BAM]:::optional
-    primary -. "--run_blobtools" .-> blob_cov[BLOBTOOLS_COVERAGE]:::optional
-    primary -. "--run_kraken2" .-> kraken[KRAKEN2_CLASSIFY]:::optional
-    kraken_db[FETCH_KRAKEN2_PLUSPFP]:::optional -.-> kraken
-    kraken --> blob_tax[BLOBTOOLS_TAXONOMY]:::optional
-    final -. "--flag_contaminants" .-> classify[CLASSIFY_CONTAMINANTS]:::optional
-    blob_tax --> classify
-    classify --> remove[REMOVE_CONTAMINANTS]:::optional
-    final --> remove
-    remove -. "flagged candidates" .-> candidate[EXTRACT_CANDIDATE_CONTIGS]:::optional
-    candidate -. "--verify_sylph" .-> sylph[SYLPH_VERIFY_CONTAMINANTS]:::optional
-    candidate -. "--verify_blast" .-> blast[BLAST_VERIFY_CONTAMINANTS]:::optional
-    sylph_db[FETCH_SYLPH_GTDB]:::optional -.-> sylph
+    subgraph final_qc["4. Final-assembly QC and contamination screening"]
+        direction TB
+        select --> qc_align[ALIGN_FOR_QC]:::qc
+        extract -. "nuclear reads" .-> qc_align
+        qc_align --> qc_sort[SORT_FOR_QC]:::qc
+        qc_sort -. "--run_qualimap" .-> qualimap[QUALIMAP_BAMQC]:::optional
+        qc_sort -. "--run_blobtools or --run_kraken2" .-> primary[FILTER_PRIMARY_BAM]:::optional
+        primary -. "--run_blobtools" .-> blob_cov[BLOBTOOLS_COVERAGE]:::optional
+        primary -. "--run_kraken2" .-> kraken[KRAKEN2_CLASSIFY]:::optional
+        kraken_db[FETCH_KRAKEN2_PLUSPFP]:::optional -.-> kraken
+        kraken --> blob_tax[BLOBTOOLS_TAXONOMY]:::optional
+        select -. "--flag_contaminants" .-> classify[CLASSIFY_CONTAMINANTS]:::optional
+        blob_tax --> classify
+        classify --> remove[REMOVE_CONTAMINANTS]:::optional
+        select --> remove
+        remove -. "flagged candidates" .-> candidate[EXTRACT_CANDIDATE_CONTIGS]:::optional
+        candidate -. "--verify_sylph" .-> sylph[SYLPH_VERIFY_CONTAMINANTS]:::optional
+        candidate -. "--verify_blast" .-> blast[BLAST_VERIFY_CONTAMINANTS]:::optional
+        sylph_db[FETCH_SYLPH_GTDB]:::optional -.-> sylph
+    end
 
-    medaka --> busco["BUSCO_NUCLEAR<br/>Medaka + purge-dups<br/>+ decontam when enabled"]:::qc
-    purge --> busco
-    remove -. "--flag_contaminants" .-> busco
+    subgraph assembly_qc["5. Candidate comparison and reports"]
+        direction TB
+        flye --> quast["QUAST_NUCLEAR<br/>Flye, Medaka, Medaka scaffold,<br/>purge, purge scaffold, decontam,<br/>and reference when available"]:::qc
+        medaka_candidate --> quast
+        purge_candidate --> quast
+        ragtag_m -.-> quast
+        ragtag_p -.-> quast
+        remove -. "--flag_contaminants" .-> quast
 
-    nuclear_asm --> quast["QUAST_NUCLEAR<br/>Flye + Medaka + Medaka scaffold<br/>+ purge + purge scaffold<br/>+ decontam + reference"]:::qc
-    medaka --> quast
-    purge --> quast
-    ragtag_m -.-> quast
-    ragtag_p -.-> quast
-    remove -. "--flag_contaminants" .-> quast
+        medaka_candidate --> busco["BUSCO_NUCLEAR<br/>Medaka + purge-dups<br/>+ decontam when enabled"]:::qc
+        purge_candidate --> busco
+        remove -. "--flag_contaminants" .-> busco
 
-    nano --> multiqc[MULTIQC]:::qc
-    stats --> multiqc
-    busco --> multiqc
-    quast --> multiqc
-    org_quast --> multiqc
-    purge --> multiqc
-    qualimap -.-> multiqc
+        read_qc --> multiqc[MULTIQC]:::qc
+        stats --> multiqc
+        org_quast --> multiqc
+        quast --> multiqc
+        busco --> multiqc
+        purge --> multiqc
+        qualimap -.-> multiqc
 
-    final --> summary[FINAL_SUMMARY]:::output
-    busco --> summary
-    quast --> summary
-    nano --> summary
-    ragtag_m -.-> summary
-    ragtag_p -.-> summary
-    sylph -.-> summary
-    blast -.-> summary
-    tools[TOOLS_REPORT]:::output --> package[PACKAGE_RESULTS]:::output
-    summary --> package
-    org_quast --> package
-    busco --> package
-    quast --> package
-    blob_tax -.-> package
-    remove -.-> package
-    sylph -.-> package
-    blast -.-> package
+        select --> summary[FINAL_SUMMARY]:::output
+        read_qc --> summary
+        quast --> summary
+        busco --> summary
+        ragtag_m -.-> summary
+        ragtag_p -.-> summary
+        sylph -.-> summary
+        blast -.-> summary
+        tools[TOOLS_REPORT]:::output --> package[PACKAGE_RESULTS]:::output
+        summary --> package
+        multiqc --> package
+        org_quast --> package
+        quast --> package
+        busco --> package
+        blob_tax -.-> package
+        remove -.-> package
+        sylph -.-> package
+        blast -.-> package
+    end
 ```
 
 For the full process-level DAG from a run, use `nextflow run main.nf -preview` or open the

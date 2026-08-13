@@ -479,6 +479,12 @@ workflow {
         // FINAL_SUMMARY picks the final genome's BUSCO from medaka/purge in-script.
         summary_in = nano_stats_ch
             .join(QUAST_NUCLEAR.out.report)
+            .join(QUAST_ORGANELLE.out.report
+                .filter { id, comp, d -> comp == 'chloroplast' }
+                .map { id, comp, d -> tuple(id, d) })
+            .join(QUAST_ORGANELLE.out.report
+                .filter { id, comp, d -> comp == 'mitochondria' }
+                .map { id, comp, d -> tuple(id, d) })
             .join(purge_cutoffs_ch)
             .join(purge_calcuts_ch)
             .join(final_ragtag_ch)
@@ -488,8 +494,8 @@ workflow {
             .join(contam_summary_ch, remainder: true)
             .join(sylph_summary_ch, remainder: true)
             .join(blast_summary_ch, remainder: true)
-            .map { id, nano, quast, cutoffs, calcuts, ragtag, bmed, bpurge, bdecon, contam, sylph, blast ->
-                tuple(id, nano, quast, cutoffs, calcuts, ragtag, bmed, bpurge, bdecon,
+            .map { id, nano, quast, qcp, qmt, cutoffs, calcuts, ragtag, bmed, bpurge, bdecon, contam, sylph, blast ->
+                tuple(id, nano, quast, cutoffs, calcuts, ragtag, qcp, qmt, bmed, bpurge, bdecon,
                       contam != null ? contam : [],
                       sylph  != null ? sylph  : [],
                       blast  != null ? blast  : [])
