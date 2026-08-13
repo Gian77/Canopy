@@ -82,6 +82,32 @@ process FINAL_SUMMARY {
         awk -F'\t' -v m="\$1" '\$1==m { printf "| **%s** |", \$1; for(i=2;i<=NF;i++) printf " %s |", \$i; print ""; exit }' "\$2" 2>/dev/null
     }
 
+    orgval() {
+        awk -F'\t' -v m="\$1" '\$1==m { print \$2; exit }' "\$2" 2>/dev/null || echo NA
+    }
+
+    org_interp() {
+        local label="\$1" report="\$2"
+        local contigs length reference n50
+        contigs=\$(orgval "# contigs" "\$report")
+        length=\$(orgval "Total length" "\$report")
+        reference=\$(orgval "Reference length" "\$report")
+        n50=\$(orgval "N50" "\$report")
+        awk -v label="\$label" -v c="\$contigs" -v l="\$length" -v r="\$reference" -v n="\$n50" 'BEGIN {
+            c=c+0; l=l+0; r=r+0; n=n+0
+            if (r > 0) pct=100*l/r; else pct=0
+            if (c <= 1 && pct >= 95)
+                msg="near-complete single-contig assembly"
+            else if (pct >= 95)
+                msg="near-reference-length assembly with multiple contigs"
+            else if (r > 0)
+                msg="assembly is shorter than the supplied reference"
+            else
+                msg="reference comparison unavailable"
+            printf "%s: %d contig(s), %.1f kb total (%.1f%% of reference), N50 %.1f kb — %s.", label, c, l/1e3, pct, n/1e3, msg
+        }'
+    }
+
     orgheader() {
         awk -F'\t' 'NR==1 { printf "| Metric |"; for(i=2;i<=NF;i++) printf " **%s** |", \$i; print ""; printf "|---|"; for(i=2;i<=NF;i++) printf "---|"; print "" }' "\$1" 2>/dev/null
     }
@@ -312,6 +338,8 @@ process FINAL_SUMMARY {
       orgrow "Genome fraction (%)" "\$QUAST_CP"
       orgrow "# misassemblies" "\$QUAST_CP"
       echo
+      echo "> **Interpretation:** \$(org_interp "Chloroplast" "\$QUAST_CP")"
+      echo
       echo "### Mitochondria"
       echo
       orgheader "\$QUAST_MT"
@@ -321,6 +349,8 @@ process FINAL_SUMMARY {
       orgrow "N50" "\$QUAST_MT"
       orgrow "Genome fraction (%)" "\$QUAST_MT"
       orgrow "# misassemblies" "\$QUAST_MT"
+      echo
+      echo "> **Interpretation:** \$(org_interp "Mitochondrion" "\$QUAST_MT")"
       echo
 
       # ── 3. Nuclear assembly progression ──────────────────────────────────
