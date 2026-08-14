@@ -175,9 +175,9 @@ nextflow run main.nf \
 
 ### HTCondor (production)
 
-`-profile condor` submits pipeline processes to HTCondor. Run the Nextflow head process from the
-submit node (`scarcity-ap-1`). The launchers process samples sequentially, with separate output
-and work directories for each sample.
+`-profile condor` submits pipeline processes to HTCondor. Run the Nextflow head processes from
+the submit node (`scarcity-ap-1`). The launchers start all five samples concurrently, with
+separate output, work, and log directories for each sample.
 
 The five samples currently in `reads/` are:
 
@@ -194,14 +194,16 @@ condor_submit pipeline.condor
 condor_q
 ```
 
-This runs `run_pipeline_condor.sh`. To run the head process directly in the background instead:
+This submits five independent jobs using `run_pipeline_condor.sh`. To run the five head
+processes directly in the background instead:
 
 ```bash
 bash run_pipeline.sh
 ```
 
-Both commands run all samples and create `results_<sample>/` and `nf-work-<sample>/`. Logs are
-written under `condor_logs/`. Set `FINAL_ASSEMBLY=purge` before either command to publish the
+Both commands run all samples concurrently and create `results_<sample>/`,
+`nf-work-<sample>/`, and sample-specific logs under `condor_logs/`. Set
+`FINAL_ASSEMBLY=purge` before either command to publish the
 purged nuclear assembly instead of the default Medaka assembly:
 
 ```bash

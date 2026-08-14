@@ -1,5 +1,7 @@
 # ---- Nextflow transient state ----
 .nextflow/
+.nextflow-*/
+.canopy-run-*/
 .nextflow.log*
 .nextflow.history
 nf-work-test/
