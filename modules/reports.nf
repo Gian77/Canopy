@@ -547,11 +547,11 @@ process PACKAGE_RESULTS {
           val(has_blast)
 
     output:
-    tuple val(sample_id), path("${sample_id}_final_package.zip"), emit: zip
+    tuple val(sample_id), path("${sample_id}_assembly.zip"), emit: zip
 
     script:
     """
-    PKG="${sample_id}_final_package"
+    PKG="${sample_id}_assembly"
     mkdir -p "\$PKG"
 
     cp ${assembly_summary} "\$PKG/${sample_id}_assembly_summary.md"
