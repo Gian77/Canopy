@@ -68,14 +68,6 @@ The workflow below shows the process structure. Stages marked `*` are optional o
 
 ```mermaid
 graph TD
-    %% Color Blind Safe Palette (Okabe-Ito / High Contrast Compliant)
-    classDef input fill:#56B4E9,stroke:#0072B2,stroke-width:2px,color:#000000
-    classDef organelle fill:#009E73,stroke:#004D40,stroke-width:2px,color:#FFFFFF
-    classDef nuclear fill:#CC79A7,stroke:#882255,stroke-width:2px,color:#FFFFFF
-    classDef scaffold fill:#E69F00,stroke:#B25900,stroke-width:2px,color:#000000
-    classDef qc fill:#D55E00,stroke:#882200,stroke-width:2px,color:#FFFFFF
-    classDef output fill:#F0E442,stroke:#999000,stroke-width:2px,color:#000000
-
     RAW["reads/<sample>/*.fastq.gz"] --> 01["01 NANOPLOT"]
     RAW --> 01b["01b FETCH_OATKDB *"]
     RAW --> 02["02 FILTER_READS"]
@@ -131,13 +123,6 @@ graph TD
     01 & 07 & 14 & 20b & 22 & 33 & 34 --> 36["36 FINAL_SUMMARY *"]
     01 & 07 & 14 & 20b & 22 & 33 & 34 --> 37["37 TOOLS_REPORT"]
     19b & 36 & 37 --> 38["38 PACKAGE_RESULTS *"]
-
-    class RAW,01,01b,02,03,04,05 input;
-    class 05b,06,07,08,09,BANDAGE,11,12,13,14,14b organelle;
-    class NUC_FASTQ,15,16,16b,17,18,19,19b nuclear;
-    class 20,20b,21,22,23,24,25,26,27,28,29,30,31,32 scaffold;
-    class 33,34,35,36,37 qc;
-    class 38 output;
 ```
 
 For the full process-level DAG from a run, use `nextflow run main.nf -preview` or open the
