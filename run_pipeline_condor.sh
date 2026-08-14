@@ -33,10 +33,13 @@ for sample in "${SAMPLES[@]}"; do
         --outdir "results_${sample}" \
         -w "nf-work-${sample}" \
         --organelle_assembler oatk \
-        --run_qualimap \
-        --run_blobtools \
-        --run_kraken2 \
-        --flag_contaminants \
+        --run_qualimap true \
+        --run_blobtools true \
+        --run_kraken2 true \
+        --flag_contaminants true \
+        --verify_sylph true \
+        --verify_blast true \
+        --blast_remote true \
         --final_assembly "${FINAL_ASSEMBLY:-medaka}" \
         -resume
     echo "=== Finished ${sample} ==="

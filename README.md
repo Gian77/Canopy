@@ -66,116 +66,78 @@ For each sample:
 
 The workflow below shows the process structure. Stages marked `*` are optional or mode-dependent.
 
-```text
-reads/<sample>/*.fastq.gz
-        │
-        ├──────────────────────────────▶ 01  NANOPLOT
-        └──────────────────────────────▶ 01b FETCH_OATKDB *
-        ▼
-02  FILTER_READS
-        │
-        ▼
-03  ALIGN_TO_ORGANELLES
-        │
-        ▼
-04  SORT_INDEX_BAM
-        │
-        ▼
-05  EXTRACT_RAW_READSETS
-        │
-        ├──────────────────────────────▶ 06  DEDUP_ORGANELLE_READS
-        │                                         │
-        │                                         ├──▶ 07  READSET_STATS *
-        │                                         │      gate
-        │                                         ├──▶ 08  ASSEMBLE_CP_FLYE *
-        │                                         └──▶ 09  ASSEMBLE_MT_FLYE *
-        │
-        └──────────────────────────────▶ 05b ASSEMBLE_ORGANELLES_OATK *
-                                           ├──▶ 01b FETCH_OATKDB
-                                           └──▶ BANDAGE_IMAGE
-                                                        │
-                         08 / 09 / 05b ─────────────────┘
-                                                        ▼
-11  SELECT_OR_MERGE_ORGANELLE_ASM
-        │
-        ▼
-12  FILTER_ORGANELLE_CONTIGS *
-        │
-        ▼
-13  POLISH_MEDAKA_ORGANELLE
-        │
-        ├──▶ 14  QUAST_ORGANELLE
-        └──▶ 14b MERQURY_QV *
+```mermaid
+graph TD
+    %% Color Blind Safe Palette (Okabe-Ito / High Contrast Compliant)
+    classDef input fill:#56B4E9,stroke:#0072B2,stroke-width:2px,color:#000000
+    classDef organelle fill:#009E73,stroke:#004D40,stroke-width:2px,color:#FFFFFF
+    classDef nuclear fill:#CC79A7,stroke:#882255,stroke-width:2px,color:#FFFFFF
+    classDef scaffold fill:#E69F00,stroke:#B25900,stroke-width:2px,color:#000000
+    classDef qc fill:#D55E00,stroke:#882200,stroke-width:2px,color:#FFFFFF
+    classDef output fill:#F0E442,stroke:#999000,stroke-width:2px,color:#000000
 
-05  nuclear FASTQ
-        │
-        ▼
-15  ASSEMBLE_NUCLEAR
-        │
-        ▼
-16  POLISH_MEDAKA
-        │
-        ├──▶ 16b MERQURY_QV *
-        ├──────────────────────────────▶ 17  PURGE_DUPS
-        │
-        ├──────────────────────────────▶ 18  MEDAKA_CANDIDATE
-        │
-        └──────────────────────────────▶ 19  HAPDUP *
-                                           ├──▶ ALIGN_FOR_HAPDUP
-                                           ├──▶ SORT_FOR_HAPDUP
-                                           └──▶ HAPDUP
-                                                        │
-                                                        └──▶ 19b HAPDUP_DELIVERABLE
+    RAW["reads/<sample>/*.fastq.gz"] --> 01["01 NANOPLOT"]
+    RAW --> 01b["01b FETCH_OATKDB *"]
+    RAW --> 02["02 FILTER_READS"]
+    02 --> 03["03 ALIGN_TO_ORGANELLES"]
+    03 --> 04["04 SORT_INDEX_BAM"]
+    04 --> 05["05 EXTRACT_RAW_READSETS"]
 
-18 / 17 candidates
-        │
-        ├──────────────────────────────▶ 20  RAGTAG_SCAFFOLD *
-        │                                         │
-        │                                         └──▶ 20b TIDK_TELOMERE_ID *
-        │
-        └──────────────────────────────▶ 21  SELECT_FINAL_ASSEMBLY
-                                                        │
-                                                        ▼
-22  ALIGN_FOR_QC *
-        │
-        ├──────────────────────────────▶ 23  QUALIMAP_BAMQC *
-        ├──────────────────────────────▶ 24  FILTER_PRIMARY_BAM *
-        │                                         │
-        │                                         ├──▶ 25  BLOBTOOLS_COVERAGE *
-        │                                         │
-        │                                         └──▶ 26  KRAKEN2_CLASSIFY *
-        │                                                         │
-        │                                                         ▼
-27  BLOBTOOLS_TAXONOMY * ───────────────┐
-                                       │
-20  RAGTAG_SCAFFOLD * ─────────────────┼──▶ 28  CONTAMINANT_FLAGGING *
-                                                        │
-                                                        ▼
-29  REMOVE_CONTAMINANTS *
-        │
-        ├──────────────────────────────▶ 30  EXTRACT_CANDIDATE_CONTIGS *
-        │                                         │
-        │                                         ├──▶ 31  SYLPH_VERIFY_CONTAMINANTS *
-        │                                         │
-        │                                         └──▶ 32  BLAST_VERIFY_CONTAMINANTS *
-        │
-15 / 16 / 17 / 18 / 20 / 28 / 29
-        │
-        ├──────────────────────────────▶ 33  QUAST_NUCLEAR
-        │
-        └──────────────────────────────▶ 34  BUSCO_NUCLEAR
+    05 --> 06["06 DEDUP_ORGANELLE_READS"]
+    06 --> 07["07 READSET_STATS *"]
+    06 --> 08["08 ASSEMBLE_CP_FLYE *"]
+    06 --> 09["09 ASSEMBLE_MT_FLYE *"]
+    05 --> 05b["05b ASSEMBLE_ORGANELLES_OATK *"]
+    05b --> 01b
+    05b --> BANDAGE["BANDAGE_IMAGE"]
+    08 --> BANDAGE
+    09 --> BANDAGE
+    BANDAGE --> 11["11 SELECT_OR_MERGE_ORGANELLE_ASM"]
+    11 --> 12["12 FILTER_ORGANELLE_CONTIGS *"]
+    12 --> 13["13 POLISH_MEDAKA_ORGANELLE"]
+    13 --> 14["14 QUAST_ORGANELLE"]
+    13 --> 14b["14b MERQURY_QV *"]
 
-01 / 07 / 14 / 20b / 22 / 33 / 34
-        │
-        ├──────────────────────────────▶ 35  MULTIQC
-        ├──────────────────────────────▶ 36  FINAL_SUMMARY *
-        │
-        └──────────────────────────────▶ 37  TOOLS_REPORT
-                                                        │
-19b / 36 / 37 / final FASTAs / reports
-        │
-        ▼
-38  PACKAGE_RESULTS *
+    05 --> NUC_FASTQ["05 nuclear FASTQ"]
+    NUC_FASTQ --> 15["15 ASSEMBLE_NUCLEAR"]
+    15 --> 16["16 POLISH_MEDAKA"]
+    16 --> 16b["16b MERQURY_QV *"]
+    16 --> 17["17 PURGE_DUPS"]
+    16 --> 18["18 MEDAKA_CANDIDATE"]
+    16 --> 19["19 HAPDUP *"]
+    19 --> 19b["19b HAPDUP_DELIVERABLE"]
+
+    17 --> 20["20 RAGTAG_SCAFFOLD *"]
+    18 --> 20
+    20 --> 20b["20b TIDK_TELOMERE_ID *"]
+    17 --> 21["21 SELECT_FINAL_ASSEMBLY"]
+    18 --> 21
+    21 --> 22["22 ALIGN_FOR_QC *"]
+    22 --> 23["23 QUALIMAP_BAMQC *"]
+    22 --> 24["24 FILTER_PRIMARY_BAM *"]
+    24 --> 25["25 BLOBTOOLS_COVERAGE *"]
+    24 --> 26["26 KRAKEN2_CLASSIFY *"]
+    26 --> 27["27 BLOBTOOLS_TAXONOMY *"]
+    27 --> 28["28 CONTAMINANT_FLAGGING *"]
+    20 --> 28
+    28 --> 29["29 REMOVE_CONTAMINANTS *"]
+    29 --> 30["30 EXTRACT_CANDIDATE_CONTIGS *"]
+    30 --> 31["31 SYLPH_VERIFY_CONTAMINANTS *"]
+    30 --> 32["32 BLAST_VERIFY_CONTAMINANTS *"]
+
+    15 & 16 & 17 & 18 & 20 & 28 & 29 --> 33["33 QUAST_NUCLEAR"]
+    15 & 16 & 17 & 18 & 20 & 28 & 29 --> 34["34 BUSCO_NUCLEAR"]
+    01 & 07 & 14 & 20b & 22 & 33 & 34 --> 35["35 MULTIQC"]
+    01 & 07 & 14 & 20b & 22 & 33 & 34 --> 36["36 FINAL_SUMMARY *"]
+    01 & 07 & 14 & 20b & 22 & 33 & 34 --> 37["37 TOOLS_REPORT"]
+    19b & 36 & 37 --> 38["38 PACKAGE_RESULTS *"]
+
+    class RAW,01,01b,02,03,04,05 input;
+    class 05b,06,07,08,09,BANDAGE,11,12,13,14,14b organelle;
+    class NUC_FASTQ,15,16,16b,17,18,19,19b nuclear;
+    class 20,20b,21,22,23,24,25,26,27,28,29,30,31,32 scaffold;
+    class 33,34,35,36,37 qc;
+    class 38 output;
 ```
 
 For the full process-level DAG from a run, use `nextflow run main.nf -preview` or open the
@@ -258,6 +220,10 @@ purged nuclear assembly instead of the default Medaka assembly:
 ```bash
 FINAL_ASSEMBLY=purge condor_submit pipeline.condor
 ```
+
+The launchers enable the complete workflow except HapDup phasing: Qualimap, BlobTools,
+Kraken2, contaminant flagging/removal, Sylph corroboration, and BLAST corroboration. HapDup
+remains disabled because neither launcher includes `--run_hapdup true`.
 
 #### Run one hardcoded sample
 
@@ -411,24 +377,10 @@ nextflow config -profile condor
 # Show the DAG without running anything
 nextflow run main.nf -preview --cp_ref ... --mt_ref ...
 
-# Test on one sample first
-nextflow run main.nf -profile condor --reads ./reads_single_sample ...
 ```
 
-## Full-sample validation
-
-Canopy must be run on the complete read set for one real biological sample. Use `-preview`
-(see Sanity checks above) when checking workflow wiring without running assembly.
-
-```bash
-nextflow run main.nf \
-    --reads $PWD/reads/F10702/ \
-    -profile condor \
-    --cp_ref refs/sorghum/sorghum_cp_NC008602.fasta \
-    --mt_ref refs/sorghum/sorghum_mt_NC008360.fasta \
-    --outdir results_F10702 \
-    -w /scratch/$USER/nf-work-F10702
-```
+Use the launcher instructions above for a real run. They ensure that each sample gets its own
+output and work directory.
 
 ## For containers
 
@@ -501,34 +453,6 @@ quay.io/biocontainers/flye:2.9.5--py312h5e9d817_2
 > (illegal CPU instruction) on the Condor compute nodes. Use `2.9.4--py310h2b6aa90_0` instead —
 > see `CLAUDE.md` for the full container-verification policy.
 
-# Test the pipeline
-
-See the use of `-resume`, to resume previously cached data.
-
-```
-nextflow run main.nf \
--profile condor \
---reads $PWD/reads/B11077 \
---cp_ref refs/sorghum/sorghum_cp_NC008602.fasta \
---mt_ref refs/sorghum/sorghum_mt_NC008360.fasta \
---outdir results_B11077 \
--w nf-work-B11077 \
--resume
-```
-
-Or simply:
-
-```
-nextflow run main.nf -profile condor --reads $PWD/reads/F10702/ --cp_ref $PWD/refs/sorghum/sorghum_cp_NC008602.fasta --mt_ref $PWD/refs/sorghum/sorghum_mt_NC008360.fasta --outdir $PWD/results_F10702 -w $PWD/nf-work-F10702 -resume
-```
-
-Using a specific nextflow session:
-
-```
-nextflow run main.nf -profile condor     --reads /mnt/cephfs/linuxhome/benucci/Canopy/reads/F10702/     --cp_ref /mnt/cephfs/linuxhome/benucci/Canopy/refs/sorghum/sorghum_cp_NC008602.fasta     --mt_ref /mnt/cephfs/linuxhome/benucci/Canopy/refs/sorghum/sorghum_mt_NC008360.fasta     --outdir /mnt/cephfs/linuxhome/benucci/Canopy/results_F10702     -w /mnt/cephfs/linuxhome/benucci/Canopy/nf-work-F10702  --run_hapdup true   -resume <session-uuid>
-```
-
-
 # Start interactive sessions in scarcity
 
 ## Method 1: tmux (recommended)
@@ -537,16 +461,9 @@ nextflow run main.nf -profile condor     --reads /mnt/cephfs/linuxhome/benucci/C
 # Start a new session named "canopy"
 tmux new -s canopy
 
-# Inside tmux, launch the pipeline as usual
+# Inside tmux, launch all five samples
 cd /mnt/cephfs/linuxhome/benucci/Canopy
-conda activate nextflow
-nextflow run main.nf -profile condor \
-    --reads $PWD/reads/B11077 \
-    --cp_ref refs/sorghum/sorghum_cp_NC008602.fasta \
-    --mt_ref refs/sorghum/sorghum_mt_NC008360.fasta \
-    --outdir results_B11077 \
-    -w nf-work-B11077 \
-    -resume
+bash run_pipeline.sh
 ```
 
 <div style="padding: 15px; border: 1px solid #007bcc; background-color: #f0f8ff; border-radius: 5px;"> 
@@ -563,22 +480,11 @@ tmux attach -t canopy
 Simpler but less interactive — no live progress bars to look at:
 
 ```
-nohup nextflow run main.nf -profile condor \
-    --reads $PWD/reads/B11077 \
-    --cp_ref refs/sorghum/sorghum_cp_NC008602.fasta \
-    --mt_ref refs/sorghum/sorghum_mt_NC008360.fasta \
-    --outdir results_B11077 \
-    -w nf-work-B11077 \
-    -resume \
-    > nf.log 2>&1 &
-
-# Note the PID
-echo $! > nf.pid
+bash run_pipeline.sh
 
 # Check progress later:
-tail -f nf.log
-ps -p $(cat nf.pid)
-kill $(cat nf.pid)
+tail -f condor_logs/pipeline.stdout.txt
+cat condor_logs/pipeline.pid
 ```
 
 # To clean up and start a complete new session
@@ -586,14 +492,14 @@ kill $(cat nf.pid)
 ```
 cd /mnt/cephfs/linuxhome/benucci/Canopy
 
-# The work directory (cached task outputs — this is the big one)
-rm -rf /mnt/cephfs/linuxhome/benucci/Canopy/nf-work-B11077/
+# Remove per-sample work directories (cached task outputs — these are the big ones)
+rm -rf nf-work-*
 
 # The .nextflow hidden directory (history, cache metadata, session info)
 rm -rf .nextflow/
 
-# The published results from previous runs (back this up first if you need it)
-rm -rf results_B11077/
+# The published results from previous runs (back them up first if needed)
+rm -rf results results_*/
 
 # Any leftover log files
 rm -f .nextflow.log* nextflow_report*.html timeline*.html trace*.txt
