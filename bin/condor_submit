@@ -1,0 +1,18 @@
+#!/bin/bash
+# Route Nextflow-generated worker submissions to the scheduler explicitly.
+# Worker tasks may invoke condor_submit from an execute node, which does not
+# necessarily have a local schedd.  Use -name rather than -remote: -remote is
+# shorthand for "-name ... -spool" and adds a requirement that pins execution
+# to the schedd host, which is not an execute node in this pool.
+set -euo pipefail
+
+REMOTE_SCHEDD="${CANOPY_CONDOR_SCHEDD:-scarcity-ap-1.glbrc.org}"
+
+# Scheduler-universe workflow heads run on the submit host. Use its local
+# schedd there so Condor treats both the head and its children as local
+# submissions (and FS authentication succeeds).
+if [[ "$(hostname -f)" == "${REMOTE_SCHEDD}" ]]; then
+    exec /usr/bin/condor_submit "$@"
+fi
+
+exec /usr/bin/condor_submit -name "${REMOTE_SCHEDD}" "$@"
