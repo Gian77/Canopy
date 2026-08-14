@@ -226,64 +226,67 @@ nextflow run main.nf \
 
 ### HTCondor (production)
 
-`-profile condor` makes every process a Condor job regardless of how you launch Nextflow
-itself. On top of that, this repo ships two wrapper scripts for launching the Nextflow *head*
-process on the submit node (`scarcity-ap-1`) — pick one depending on whether you want Condor
-supervising the head process or not:
+`-profile condor` submits pipeline processes to HTCondor. Run the Nextflow head process from the
+submit node (`scarcity-ap-1`). The launchers process samples sequentially, with separate output
+and work directories for each sample.
 
-**`condor_submit pipeline.condor`** (recommended) — submits `run_pipeline_condor.sh` as a
-`universe = local` Condor job. Condor owns the head process's lifecycle: it stays in the queue
-for the life of the run, is held (not silently dropped) if it exits non-zero
-(`on_exit_hold`), and its logs land in `condor_logs/pipeline.condor.{out,err,log}`. Resume
-behavior and the final-assembly choice are env-var overridable:
+The five samples currently in `reads/` are:
 
-```bash
-# Defaults to -resume (latest session) and --final_assembly medaka
-condor_submit pipeline.condor
-
-# Pin a specific session (see .nextflow/history) instead of the latest — do this whenever a
-# -preview or other stray invocation may have run recently, or bare -resume will silently
-# target that (empty-cache) session instead and force a full re-run.
-RESUME_SESSION=<session-uuid> condor_submit pipeline.condor
-
-# Publish the purged genome instead of the default Medaka one
-FINAL_ASSEMBLY=purge condor_submit pipeline.condor
-
-condor_q                # watch the job
-condor_rm <cluster_id>  # stop it
+```text
+B11077  BTx2932  F07020  F10702  F25101
 ```
 
-For the dedicated B11077 Sylph/decontamination regression run:
+#### Run all samples
+
+Recommended: submit the head process to Condor.
 
 ```bash
-mkdir -p condor_logs
-condor_submit pipeline_B11077_sylph.condor
+condor_submit pipeline.condor
 condor_q
 ```
 
-This uses separate `results_B11077/`, `nf-work-B11077/`, and Condor log paths. Set
-`RESUME_SESSION=<session-uuid>` to resume a specific session, or
-`FINAL_ASSEMBLY=purge` to test the purged final-assembly choice.
-
-The Condor launchers prepend `bin/` to `PATH`, where Canopy provides a
-`condor_submit` wrapper that sends Nextflow-generated worker submissions to the
-remote schedd on `scarcity-ap-1.glbrc.org`. Override the scheduler with
-`CANOPY_CONDOR_SCHEDD` if the cluster configuration changes.
-
-**`bash run_pipeline.sh`** — a plain `nohup` launcher you run directly (e.g. inside `tmux`, see
-Interactive sessions below) instead of submitting it as a Condor job itself; per-process
-scheduling still goes through Condor via `-profile condor`, only the head process is unsupervised.
-Simpler to inspect/kill by hand (PID + stdout/stderr recorded under `condor_logs/`), but Condor
-won't notice or hold on a failure the way `pipeline.condor` does:
+This runs `run_pipeline_condor.sh`. To run the head process directly in the background instead:
 
 ```bash
-FINAL_ASSEMBLY=purge bash run_pipeline.sh   # FINAL_ASSEMBLY optional, defaults to medaka
+bash run_pipeline.sh
 ```
 
-Both scripts currently hardcode the F10702 sample paths/flags near the top — edit them directly
-(or generalize to arguments) for a different sample. To watch either run live with coloured
-task-level output instead of a raw `tail -f`, use `./watch_pipeline.sh [path/to/.nextflow.log]`
-(defaults to `.nextflow.log` in the current directory).
+Both commands run all samples and create `results_<sample>/` and `nf-work-<sample>/`. Logs are
+written under `condor_logs/`. Set `FINAL_ASSEMBLY=purge` before either command to publish the
+purged nuclear assembly instead of the default Medaka assembly:
+
+```bash
+FINAL_ASSEMBLY=purge condor_submit pipeline.condor
+```
+
+#### Run one hardcoded sample
+
+Edit the `SAMPLES` line near the top of both launchers. For example, to run only F10702:
+
+```bash
+SAMPLES=(F10702)
+```
+
+Then launch it using either method:
+
+```bash
+condor_submit pipeline.condor
+# or
+bash run_pipeline.sh
+```
+
+To choose another sample, replace `F10702` with the directory name under `reads/`. The sample
+name must match a directory containing one or more `*.fastq.gz` files.
+
+To watch the Nextflow log:
+
+```bash
+./watch_pipeline.sh
+```
+
+Stop a Condor head job with `condor_rm <cluster_id>`. Use `-resume` in the launchers to continue
+completed work after an interruption; remove old `results_<sample>/` and `nf-work-<sample>/`
+directories first when a genuinely fresh run is required.
 
 For a one-off run against different data, the plain inline command works too:
 
