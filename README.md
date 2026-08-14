@@ -11,14 +11,16 @@
   <img src=".logo/canopy.png" alt="Canopy logo">
 </p>
 
-## a nextflow pipeline for plant genome assembly
-
 `Canopy` is a [nextflow](https://www.nextflow.io/) pipeline for plant genome assembly.
 This pipeline is currently under development. At the moment this is ONT-only de novo
 assembly developed for sorghum genomes with explicit organelle separation. The name
 **Canopy** refers to the upper layer of a plant — the whole crown that emerges once every
 branch and leaf is assembled together, much like how this pipeline assembles a complete
 genome from thousands of individual long reads.
+
+## Contact
+
+Gian M. N. Benucci, Ph.D. — [benucci@msu.edu](mailto:benucci@msu.edu) — Michigan State University
 
 ## What Canopy does (for now)
 
