@@ -78,7 +78,7 @@ process BUSCO_NUCLEAR {
 process MULTIQC {
     label         'qc'
     errorStrategy 'ignore'   // staging timeout on CephFS should not fail the whole run
-    publishDir "${params.outdir}/multiqc", mode: 'symlink'
+    publishDir "${params.outdir}/multiqc", mode: 'copy'
     container 'quay.io/biocontainers/multiqc:1.25.1--pyhdfd78af_0'
 
     input:

@@ -18,19 +18,25 @@ process ASSEMBLE_CP_FLYE {
 
     script:
     """
+    # Flye finding nothing to assemble is a biological result, so emit an empty assembly. Any
+    # other failure (e.g. SIGILL on a bad node) must fail the task so it can be retried.
+    flye_status=0
     flye \\
         --nano-hq ${reads} \\
         --genome-size 150k \\
         --threads ${task.cpus} \\
         --out-dir flye_cp_${sample_id} \\
         --min-overlap 5000 \\
-        --asm-coverage 50 || true
+        --asm-coverage 50 || flye_status=\$?
 
     if [ -f flye_cp_${sample_id}/assembly.fasta ]; then
         cp flye_cp_${sample_id}/assembly.fasta ${sample_id}_cp_raw.fasta
-    else
-        echo "Flye failed on chloroplast — emitting empty assembly" >&2
+    elif grep -qE 'No disjointigs|No contigs' flye_cp_${sample_id}/flye.log; then
+        echo "Flye assembled nothing on chloroplast — emitting empty assembly" >&2
         touch ${sample_id}_cp_raw.fasta
+    else
+        echo "Flye failed on chloroplast (exit \$flye_status)" >&2
+        exit \$(( flye_status == 0 ? 1 : flye_status ))
     fi
     """
 }
@@ -50,18 +56,23 @@ process ASSEMBLE_MT_FLYE {
 
     script:
     """
+    # See ASSEMBLE_CP_FLYE: only "nothing to assemble" produces an empty assembly.
+    flye_status=0
     flye \\
         --nano-hq ${reads} \\
         --genome-size 500k \\
         --threads ${task.cpus} \\
         --out-dir flye_mt_${sample_id} \\
-        --min-overlap 5000 || true
+        --min-overlap 5000 || flye_status=\$?
 
     if [ -f flye_mt_${sample_id}/assembly.fasta ]; then
         cp flye_mt_${sample_id}/assembly.fasta ${sample_id}_mt_raw.fasta
-    else
-        echo "Flye failed on mitochondria — emitting empty assembly" >&2
+    elif grep -qE 'No disjointigs|No contigs' flye_mt_${sample_id}/flye.log; then
+        echo "Flye assembled nothing on mitochondria — emitting empty assembly" >&2
         touch ${sample_id}_mt_raw.fasta
+    else
+        echo "Flye failed on mitochondria (exit \$flye_status)" >&2
+        exit \$(( flye_status == 0 ? 1 : flye_status ))
     fi
     """
 }

@@ -52,17 +52,20 @@ For each sample:
     `--run_qualimap`)
 15. **Contaminant flagging (optional)** — `--flag_contaminants` flags a contig as
     contaminant only when **all three** hold: non-target phylum by BlobTools, unplaced by
-    RagTag, and abnormal GC% — then produces a `decontam` genome version, QC'd with
-    QUAST/BUSCO alongside the other candidates. Requires `--run_kraken2` + `--nuclear_ref`.
-16. **Sylph corroboration (optional)** — `--verify_sylph` independently checks only the
-    contigs flagged above against GTDB using containment ANI. It is advisory and does not
+    RagTag, and under 10% aligned to the nuclear reference — then moves those contigs out of the
+    nuclear genome into a separate FASTA. The resulting `decontam` genome is the published nuclear
+    genome, QC'd with QUAST/BUSCO alongside the other candidates. Unplaced, unaligned contigs
+    with no taxonomy call stay in the genome and are listed for review (`decision` column of
+    the audit table). Requires `--run_kraken2` + `--nuclear_ref`.
+16. **Sylph corroboration (optional)** — `--verify_sylph` independently checks the removed
+    and review contigs against GTDB using containment ANI. It is advisory and does not
     change which contigs are removed; it requires `--flag_contaminants` and records a
     per-contig corroboration table in the published QC output and results archive.
 17. **Reports** — MultiQC aggregation, a human-readable per-sample assembly summary
     (`FINAL_SUMMARY`, requires `--nuclear_ref`), a tool-citations report, and
-    `PACKAGE_RESULTS` — zips the summary, final genome, organelle FASTAs, QUAST/BUSCO
-    reports, and (when enabled) the blob plot, contamination audit, and Sylph corroboration
-    into one small archive
+    `PACKAGE_RESULTS` — zips the genome files, summary, QUAST/BUSCO reports, and (when
+    enabled) the blob plot, contamination audit, review list, and Sylph and BLAST tables into
+    one small archive
 
 ## Workflow DAG
 
@@ -210,19 +213,41 @@ purged nuclear assembly instead of the default Medaka assembly:
 FINAL_ASSEMBLY=purge condor_submit pipeline.condor
 ```
 
-The launchers enable the complete workflow except HapDup phasing: Qualimap, BlobTools,
-Kraken2, contaminant flagging/removal, Sylph corroboration, and BLAST corroboration. HapDup
-remains disabled because neither launcher includes `--run_hapdup true`.
+The launchers use the same settings for every sample, including Flye for organelles, and
+enable the complete workflow except HapDup phasing: Qualimap, BlobTools, Kraken2, contaminant
+flagging/removal, Sylph corroboration, and BLAST corroboration. HapDup remains disabled because
+neither launcher includes `--run_hapdup true`.
+
+Set `OUTDIR_SUFFIX` to keep a run separate from earlier results, for example
+`OUTDIR_SUFFIX=_v3 condor_submit pipeline.condor` writes to `results_<sample>_v3/` and names the
+Condor logs to match. Cached tasks in `nf-work-<sample>/` are still reused.
+
+#### Results
+
+Each sample's archive, `results_<sample>/reports/<sample>/<sample>_assembly.zip`, holds four
+genome files:
+
+| File | Contents |
+|---|---|
+| `<sample>_nuclear.fasta` | Nuclear genome to use, without removed contigs. Published uncompressed as `assembly/decontam/<sample>/<sample>_decontam.fasta` |
+| `<sample>_chloroplast.fasta` | Chloroplast assembly |
+| `<sample>_mitochondria.fasta` | Mitochondrial assembly |
+| `<sample>_removed_contigs.fasta` | Whole contigs removed from the nuclear genome, for checking. Empty if none were removed |
+
+`<sample>_contamination_audit.tsv` gives the decision and evidence for each contig, and
+`<sample>_review_contigs.txt` lists contigs that stay in the nuclear genome until checked. The
+run fails if the nuclear and removed FASTAs do not add up to the scaffolded genome.
 
 #### Run one hardcoded sample
 
-Edit the `SAMPLES` line near the top of both launchers. For example, to run only F10702:
+Edit the `queue sample in ...` line of `pipeline.condor`, or the `SAMPLES` line of
+`run_pipeline.sh`. For example, to run only F10702:
 
 ```bash
 SAMPLES=(F10702)
 ```
 
-Then launch it using either method:
+Then launch it with the matching command:
 
 ```bash
 condor_submit pipeline.condor
@@ -280,7 +305,7 @@ speed/accuracy setting, pick the matching Medaka model instead.
 | `--nuclear_ref`         | none                                    | Nuclear reference FASTA; enables RagTag scaffolding, QUAST genome-fraction, and `FINAL_SUMMARY` |
 | `--organelle_assembler` | `flye`                                 | `flye` (per-compartment) or `oatk` (HMM-based read detection)  |
 | `--genome_size`         | `720m`                                 | Estimated nuclear genome size for Flye                         |
-| `--medaka_model`        | `r1041_e82_400bps_sup_v5.0.0`          | Match your basecaller + chemistry                               |
+| `--medaka_model`        | `r1041_e82_400bps_sup_v5.2.0`          | Match your basecaller + chemistry                               |
 | `--busco_lineage`       | `poales_odb10`                         | Plant lineage; downloaded auto by BUSCO                        |
 | `--run_hapdup`          | `false`                                | Enable for diploid phasing                                     |
 | `--calcuts_args`        | `""` (autotune)                        | Manual purge_dups cutoffs, e.g. `"-l 5 -m 22 -u 120"`           |
@@ -291,17 +316,16 @@ speed/accuracy setting, pick the matching Medaka model instead.
 | `--kraken2_db`          | PlusPFP DB path                        | Kraken2 database (Standard + protozoa/fungi/plant); ~231.5 GB loaded, needs a big-RAM node |
 | `--taxdump_dir`         | PlusPFP DB path                        | NCBI taxdump (nodes.dmp/names.dmp) BlobTools uses to resolve Kraken2 taxids |
 | `--kraken2_confidence`  | `0.1`                                  | Kraken2 `--confidence`; without it, long contigs can get spuriously classified from a handful of stray k-mer hits |
-| `--flag_contaminants`   | `false`                                | Flags + removes contaminant contigs (needs `--run_kraken2` + `--nuclear_ref`); produces a `decontam` genome version |
+| `--flag_contaminants`   | `false`                                | Moves contaminant contigs out of the nuclear genome into a separate FASTA (needs `--run_kraken2` + `--nuclear_ref`) |
 | `--contam_target_phylum`| `Streptophyta`                         | Plant phylum for the non-target-phylum check                   |
-| `--contam_gc_min`/`--contam_gc_max` | `0.20` / `0.70`             | Eukaryotic-normal GC fraction range for the flagging rule       |
-| `--verify_sylph`        | `false`                                | Advisory ANI corroboration of flagged contigs against GTDB; requires `--flag_contaminants` |
+| `--contam_max_ref_aligned` | `0.10`                              | A contig aligning to the nuclear reference above this fraction is never flagged |
+| `--verify_sylph`        | `false`                                | Advisory ANI corroboration of removed and review contigs against GTDB; requires `--flag_contaminants` |
 | `--sylph_db`            | `${projectDir}/databases/sylph/gtdb-r226-c200-dbv1.syldb` | Sylph GTDB sketch database; downloaded automatically if the path is absent |
 | `--sylph_min_ani`       | `90`                                  | Minimum adjusted ANI passed to Sylph query                             |
-| `--verify_blast`        | `false`                               | Advisory BLASTn corroboration; uses remote NCBI BLAST unless `--blast_db` is supplied |
-| `--blast_db`            | `null`                                | Optional directory containing a local NCBI BLAST nucleotide database with prefix `nt` |
-| `--blast_remote`        | `true`                                | Use NCBI remote BLAST when no local database is supplied                       |
+| `--verify_blast`        | `false`                               | Advisory BLASTn corroboration against a local database only; remote BLAST is not supported |
+| `--blast_db`            | `${projectDir}/databases/blast/core_nt/core_nt` | Prefix of a local BLAST nucleotide database; the database itself is not downloaded by the pipeline |
 | `--blast_min_identity`  | `90`                                  | Minimum BLASTn percent identity for corroboration                     |
-| `--blast_min_qcov`      | `50`                                  | Minimum BLASTn query coverage percentage for corroboration             |
+| `--blast_min_qcov`      | `50`                                  | Minimum BLASTn query coverage percentage, summed over all alignments to the best subject |
 | `--outdir`              | `results`                              | Output directory                                                |
 
 > `--skip_purge` is retired — purge_dups always runs now; use `--final_assembly medaka` (equivalent to the old skip behavior) or `--final_assembly purge`.
@@ -319,7 +343,7 @@ stored under `databases/sylph/` and reused across runs. A Sylph non-match is not
 proof that Kraken2/BlobTools was wrong; short contigs may simply lack enough sequence for a
 confident ANI estimate.
 
-To add BLASTn corroboration using NCBI's remote service, enable:
+To add BLASTn corroboration against a local database, enable:
 
 ```bash
 --run_kraken2 true \
@@ -328,10 +352,11 @@ To add BLASTn corroboration using NCBI's remote service, enable:
 --verify_blast true
 ```
 
-BLASTn is run only on contigs already flagged by the conservative contamination rule. Its
+BLASTn is run only on contigs removed or listed for review by the contamination rule. Its
 results are advisory and are written alongside the Sylph results; neither method changes the
-removal decision. For a reproducible offline run, supply `--blast_db` pointing to a local
-formatted NCBI database with prefix `nt`; remote results reflect the current NCBI database.
+removal decision. `--blast_db` is the prefix of a local formatted NCBI database and defaults
+to `databases/blast/core_nt/core_nt`. The run stops if that database is missing. Remote BLAST
+is not supported, so assembly sequence is never sent to NCBI.
 
 ## Resource classes (configured in nextflow.config)
 
