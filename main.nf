@@ -18,9 +18,9 @@ params.oatk_pltd_db   = "https://raw.githubusercontent.com/c-zhou/OatkDB/${param
 params.kraken2_pluspfp_version = "20260626"   // genome-idx/Langmead prebuilt Kraken2 index build date
 params.oatkdb_recipe  = "v1-pressed"
 params.outdir         = "results"
-params.genome_size    = "720m"
+params.genome_size    = "780m"
 params.busco_lineage  = "poales_odb10"
-params.medaka_model   = "r1041_e82_400bps_sup_v5.0.0"
+params.medaka_model   = "r1041_e82_400bps_sup_v5.2.0"
 params.run_hapdup     = false
 params.help           = false
 
@@ -48,13 +48,24 @@ def helpMessage() {
       --organelle_min_ident [float] Min identity (matches / alignment length)       [default: 0.7]
 
     Nuclear assembly options:
-      --genome_size [str]           Estimated nuclear genome size                   [default: 800m]
+      --genome_size [str]           Estimated nuclear genome size                   [default: 780m]
       --nuclear_ref [path]          Nuclear reference FASTA (for scaffolding)       [default: none]
       --run_hapdup [bool]           Run HapDup phasing step                         [default: false]
 
     Polishing & QC options:
-      --medaka_model [str]          Medaka model (null = auto-detect from reads)    [default: null]
+      --medaka_model [str]          Medaka model                                    [default: r1041_e82_400bps_sup_v5.2.0]
       --busco_lineage [str]         BUSCO lineage dataset                           [default: poales_odb10]
+
+    Contaminant options:
+      --run_kraken2 [bool]          Classify contigs of the final genome            [default: false]
+      --flag_contaminants [bool]    Move contaminants out of the nuclear genome     [default: false]
+                                    (needs --run_kraken2 and --nuclear_ref)
+      --contam_max_ref_aligned [float] Max fraction aligned to reference to remove  [default: 0.10]
+      --verify_sylph [bool]         Advisory check of removed and review contigs    [default: false]
+      --verify_blast [bool]         Advisory check against local --blast_db         [default: false]
+      --fcs_screen [bool]           FCS-GX/FCS-adaptor screening, evidence-based    [default: false]
+                                    removal, and final + flagged genome versions
+                                    (needs --flag_contaminants and --verify_blast)
 
     General options:
       --outdir [path]               Output directory                                [default: results]
@@ -75,12 +86,24 @@ include {ALIGN_TO_ORGANELLES; SORT_INDEX_BAM; EXTRACT_RAW_READSETS; DEDUP_ORGANE
 include {ASSEMBLE_CP_FLYE; ASSEMBLE_MT_FLYE; ASSEMBLE_ORGANELLES_OATK; ASSEMBLE_NUCLEAR} from './modules/assembly.nf'
 include {POLISH_MEDAKA; POLISH_MEDAKA_ORGANELLE; PURGE_DUPS; ALIGN_FOR_HAPDUP; SORT_FOR_HAPDUP; HAPDUP} from './modules/polishing.nf'
 include {RAGTAG_SCAFFOLD; RAGTAG_SCAFFOLD as RAGTAG_PREPURGE} from './modules/scaffolding.nf'
-include {KRAKEN2_CLASSIFY; BLOBTOOLS_TAXONOMY; CLASSIFY_CONTAMINANTS; REMOVE_CONTAMINANTS; EXTRACT_CANDIDATE_CONTIGS; SYLPH_VERIFY_CONTAMINANTS; BLAST_VERIFY_CONTAMINANTS} from './modules/contamination.nf'
+include {KRAKEN2_CLASSIFY; BLOBTOOLS_TAXONOMY; ALIGN_UNPLACED_TO_REFERENCE; CLASSIFY_CONTAMINANTS; REMOVE_CONTAMINANTS; EXTRACT_CANDIDATE_CONTIGS; SYLPH_VERIFY_CONTAMINANTS; BLAST_VERIFY_CONTAMINANTS; ALIGN_UNPLACED_TO_FUNGI; APPLY_CONTAMINANT_RULE; WRITE_GENOME_VERSIONS; REFINE_GENOME_VERSIONS; NCBI_SCREEN_SUMMARY} from './modules/contamination.nf'
+include {FCS_GX_SCREEN as FCS_GX_FULL; FCS_GX_SCREEN as FCS_GX_FINAL; FCS_ADAPTOR_SCREEN as FCS_ADAPTOR_FULL; FCS_ADAPTOR_SCREEN as FCS_ADAPTOR_FINAL; FCS_GX_SCREEN as FCS_GX_FINAL2; FCS_ADAPTOR_SCREEN as FCS_ADAPTOR_FINAL2} from './modules/contamination.nf'
 include {FINAL_SUMMARY; TOOLS_REPORT; PACKAGE_RESULTS} from './modules/reports.nf'
 
 // ============================================================
 //  Workflow
 // ============================================================
+
+// True when an NCBI screen report has any row besides its comment lines.
+def has_hits(report) {
+    report.readLines().any { l -> l.trim() && !l.startsWith('#') }
+}
+
+// The items of ch whose sample is in ids, a channel of (id, true).
+def only_clean(ch, ids) {
+    ch.join(ids).map { row -> row[0..-2] }
+}
+
 workflow {
 
     if (params.help) {
@@ -111,8 +134,17 @@ workflow {
         exit 1, "ERROR: --verify_blast requires --flag_contaminants (it corroborates the " +
                 "contigs that step already flagged). Enable both, or drop --verify_blast."
     }
-    if (params.verify_blast && !params.blast_db && !params.blast_remote) {
-        exit 1, "ERROR: --verify_blast requires --blast_db or --blast_remote true."
+    if (params.fcs_screen && !(params.flag_contaminants && params.verify_blast)) {
+        exit 1, "ERROR: --fcs_screen requires --flag_contaminants and --verify_blast (the removal " +
+                "rule combines their evidence with FCS-GX). Enable both, or drop --fcs_screen."
+    }
+    if (params.containsKey('blast_remote')) {
+        exit 1, "ERROR: --blast_remote is no longer supported. BLASTn only searches a local " +
+                "database (--blast_db), so assembly sequence is never sent to a remote service."
+    }
+    if (params.verify_blast && !(params.blast_db && file("${params.blast_db}.nal").exists())) {
+        exit 1, "ERROR: --verify_blast requires --blast_db set to the prefix of a local BLAST " +
+                "database, such as databases/blast/core_nt/core_nt (no ${params.blast_db}.nal found)."
     }
 
     // ---- Banner ----
@@ -365,17 +397,25 @@ workflow {
             KRAKEN2_CLASSIFY(primary_bam_ch, kraken2_db_ch)
             BLOBTOOLS_TAXONOMY(KRAKEN2_CLASSIFY.out.hits, taxdump_ch)
 
-            // Flag + remove contaminant contigs from the final genome (3-way AND: non-target
-            // phylum, unplaced by RagTag, abnormal GC — see modules/contamination.nf).
+            // Flag + remove contaminant contigs from the final genome (non-target phylum,
+            // unplaced by RagTag, not aligning to the reference — see modules/contamination.nf).
             if (params.flag_contaminants) {
-                classify_in = BLOBTOOLS_TAXONOMY.out.results.join(final_agp_ch)
+                ALIGN_UNPLACED_TO_REFERENCE(nuclear_final.join(final_agp_ch), nuclear_ref_ch)
+                classify_in = BLOBTOOLS_TAXONOMY.out.results
+                    .join(final_agp_ch)
+                    .join(ALIGN_UNPLACED_TO_REFERENCE.out.aligned)
                 CLASSIFY_CONTAMINANTS(classify_in)
-                REMOVE_CONTAMINANTS(nuclear_final.join(CLASSIFY_CONTAMINANTS.out.ids))
-                decontam_final = REMOVE_CONTAMINANTS.out.assembly
+                if (params.verify_sylph || params.verify_blast) {
+                    EXTRACT_CANDIDATE_CONTIGS(
+                        nuclear_final
+                            .join(CLASSIFY_CONTAMINANTS.out.ids)
+                            .join(CLASSIFY_CONTAMINANTS.out.review_ids)
+                    )
+                }
 
-                // Independent second opinion on the flagged candidates only (typically a
-                // handful of contigs) — containment ANI against real GTDB genomes, rather than
-                // Kraken2's k-mer LCA approach. Advisory: does not change what got removed above.
+                // Independent second opinion on the removed and review contigs only —
+                // containment ANI against real GTDB genomes, rather than Kraken2's k-mer LCA
+                // approach. Advisory: does not change what got removed above.
                 if (params.verify_sylph) {
                     if (file(params.sylph_db).exists()) {
                         sylph_db_ch = Channel.value(file(params.sylph_db, checkIfExists: true))
@@ -383,12 +423,94 @@ workflow {
                         FETCH_SYLPH_GTDB()
                         sylph_db_ch = FETCH_SYLPH_GTDB.out.db
                     }
-                    EXTRACT_CANDIDATE_CONTIGS(nuclear_final.join(CLASSIFY_CONTAMINANTS.out.ids))
                     SYLPH_VERIFY_CONTAMINANTS(EXTRACT_CANDIDATE_CONTIGS.out.fasta, sylph_db_ch)
                 }
                 if (params.verify_blast) {
-                    blast_db_ch = Channel.value(params.blast_db ?: '')
-                    BLAST_VERIFY_CONTAMINANTS(EXTRACT_CANDIDATE_CONTIGS.out.fasta, blast_db_ch)
+                    def blast_db_path = file(params.blast_db)
+                    BLAST_VERIFY_CONTAMINANTS(
+                        EXTRACT_CANDIDATE_CONTIGS.out.fasta,
+                        Channel.value(blast_db_path.parent),
+                        Channel.value(blast_db_path.name)
+                    )
+                }
+
+                // With --fcs_screen the published genome comes from the combined evidence rule and
+                // adapter trimming, then is screened again. Otherwise it is the Kraken-rule split.
+                if (params.fcs_screen) {
+                    gx_db_ch = Channel.value(file(params.fcs_gx_db, checkIfExists: true))
+                    full_ch  = nuclear_final.map { id, fa -> tuple(id, 'full', fa) }
+                    FCS_GX_FULL(full_ch, gx_db_ch)
+                    FCS_ADAPTOR_FULL(full_ch)
+                    ALIGN_UNPLACED_TO_FUNGI(nuclear_final.join(final_agp_ch),
+                                            Channel.value(file(params.fungal_refs, checkIfExists: true)))
+                    APPLY_CONTAMINANT_RULE(
+                        CLASSIFY_CONTAMINANTS.out.audit
+                            .join(BLOBTOOLS_TAXONOMY.out.results)
+                            .join(FCS_GX_FULL.out.report.map { id, stage, f -> tuple(id, f) })
+                            .join(ALIGN_UNPLACED_TO_FUNGI.out.aligned)
+                            .join(BLAST_VERIFY_CONTAMINANTS.out.corroboration),
+                        Channel.value(file("${projectDir}/bin/canopy_contig_rule.py", checkIfExists: true))
+                    )
+                    WRITE_GENOME_VERSIONS(
+                        nuclear_final
+                            .join(final_agp_ch)
+                            .join(APPLY_CONTAMINANT_RULE.out.decisions)
+                            .join(FCS_ADAPTOR_FULL.out.report),
+                        Channel.value(file("${projectDir}/bin/canopy_write_genomes.py", checkIfExists: true))
+                    )
+
+                    final_screen_ch = WRITE_GENOME_VERSIONS.out.assembly.map { id, fa -> tuple(id, 'final', fa) }
+                    FCS_GX_FINAL(final_screen_ch, gx_db_ch)
+                    FCS_ADAPTOR_FINAL(final_screen_ch)
+
+                    // Removing contaminants and trimming adapters can expose hits the first screen
+                    // could not call. Genomes with hits get one more round using the same rule; clean
+                    // genomes pass straight through, so their later tasks stay cached. Hits after this
+                    // round are left for inspection (screen_status=CHECK).
+                    screened_ch = WRITE_GENOME_VERSIONS.out.stats
+                        .join(FCS_GX_FINAL.out.report.map { id, stage, f -> tuple(id, f) })
+                        .join(FCS_ADAPTOR_FINAL.out.report.map { id, stage, f -> tuple(id, f) })
+                        .branch { id, stats, gx, adaptor ->
+                            clean: !has_hits(gx) && !has_hits(adaptor)
+                            hits:  true
+                        }
+                    REFINE_GENOME_VERSIONS(
+                        CLASSIFY_CONTAMINANTS.out.audit
+                            .join(BLOBTOOLS_TAXONOMY.out.results)
+                            .join(FCS_GX_FULL.out.report.map { id, stage, f -> tuple(id, f) })
+                            .join(ALIGN_UNPLACED_TO_FUNGI.out.aligned)
+                            .join(BLAST_VERIFY_CONTAMINANTS.out.corroboration)
+                            .join(WRITE_GENOME_VERSIONS.out.extras.map { id, agp, flagged, flagged_agp, trims ->
+                                tuple(id, flagged, flagged_agp, trims)
+                            })
+                            .join(screened_ch.hits.map { id, stats, gx, adaptor -> tuple(id, gx, adaptor) }),
+                        Channel.value(file("${projectDir}/bin/canopy_contig_rule.py", checkIfExists: true)),
+                        Channel.value(file("${projectDir}/bin/canopy_write_genomes.py", checkIfExists: true)),
+                        Channel.value(file("${projectDir}/bin/canopy_merge_trims.py", checkIfExists: true))
+                    )
+                    refine_screen_ch = REFINE_GENOME_VERSIONS.out.assembly.map { id, fa -> tuple(id, 'final2', fa) }
+                    FCS_GX_FINAL2(refine_screen_ch, gx_db_ch)
+                    FCS_ADAPTOR_FINAL2(refine_screen_ch)
+
+                    // The last round of each sample, whichever that was.
+                    clean_ids_ch   = screened_ch.clean.map { row -> tuple(row[0], true) }
+                    decontam_final = only_clean(WRITE_GENOME_VERSIONS.out.assembly, clean_ids_ch).mix(REFINE_GENOME_VERSIONS.out.assembly)
+                    final_extras_ch    = only_clean(WRITE_GENOME_VERSIONS.out.extras, clean_ids_ch).mix(REFINE_GENOME_VERSIONS.out.extras)
+                    final_decisions_ch = only_clean(APPLY_CONTAMINANT_RULE.out.decisions, clean_ids_ch).mix(REFINE_GENOME_VERSIONS.out.decisions)
+                    final_contam_ch    = only_clean(APPLY_CONTAMINANT_RULE.out.summary, clean_ids_ch).mix(REFINE_GENOME_VERSIONS.out.summary)
+                    last_gx_ch = screened_ch.clean.map { id, stats, gx, adaptor -> tuple(id, gx) }
+                        .mix(FCS_GX_FINAL2.out.report.map { id, stage, f -> tuple(id, f) })
+                    last_adaptor_ch = screened_ch.clean.map { id, stats, gx, adaptor -> tuple(id, adaptor) }
+                        .mix(FCS_ADAPTOR_FINAL2.out.report.map { id, stage, f -> tuple(id, f) })
+                    NCBI_SCREEN_SUMMARY(
+                        screened_ch.clean.map { id, stats, gx, adaptor -> tuple(id, stats) }
+                            .mix(REFINE_GENOME_VERSIONS.out.stats)
+                            .join(last_gx_ch)
+                            .join(last_adaptor_ch)
+                    )
+                } else {
+                    REMOVE_CONTAMINANTS(nuclear_final.join(CLASSIFY_CONTAMINANTS.out.ids))
+                    decontam_final = REMOVE_CONTAMINANTS.out.assembly
                 }
             }
         }
@@ -472,7 +594,9 @@ workflow {
 
         // contamination summary is optional (only when --flag_contaminants); pad with an
         // empty file via remainder:true + null-check, same pattern as blob_ch below.
-        contam_summary_ch = params.flag_contaminants ? CLASSIFY_CONTAMINANTS.out.summary : Channel.empty()
+        contam_summary_ch = params.fcs_screen ? final_contam_ch
+                          : params.flag_contaminants ? CLASSIFY_CONTAMINANTS.out.summary : Channel.empty()
+        ncbi_screen_ch    = params.fcs_screen ? NCBI_SCREEN_SUMMARY.out.summary : Channel.empty()
         sylph_summary_ch  = params.verify_sylph      ? SYLPH_VERIFY_CONTAMINANTS.out.summary : Channel.empty()
         blast_summary_ch  = params.verify_blast      ? BLAST_VERIFY_CONTAMINANTS.out.summary : Channel.empty()
 
@@ -494,11 +618,13 @@ workflow {
             .join(contam_summary_ch, remainder: true)
             .join(sylph_summary_ch, remainder: true)
             .join(blast_summary_ch, remainder: true)
-            .map { id, nano, quast, qcp, qmt, cutoffs, calcuts, ragtag, bmed, bpurge, bdecon, contam, sylph, blast ->
+            .join(ncbi_screen_ch, remainder: true)
+            .map { id, nano, quast, qcp, qmt, cutoffs, calcuts, ragtag, bmed, bpurge, bdecon, contam, sylph, blast, ncbi ->
                 tuple(id, nano, quast, cutoffs, calcuts, ragtag, qcp, qmt, bmed, bpurge, bdecon,
                       contam != null ? contam : [],
                       sylph  != null ? sylph  : [],
-                      blast  != null ? blast  : [])
+                      blast  != null ? blast  : [],
+                      ncbi   != null ? ncbi   : [])
             }
         FINAL_SUMMARY(summary_in)
     }
@@ -508,7 +634,9 @@ workflow {
     //     so a run's key results can be grabbed over FileZilla without touching the full,
     //     much larger (100+ GB) output directory.
     if (params.nuclear_ref) {
-        final_busco_ch = busco_summ.filter { id, stage, f -> stage == params.final_assembly }
+        // When contaminants were removed, the decontam genome is the published nuclear genome.
+        def final_busco_stage = has_decontam ? 'decontam' : params.final_assembly
+        final_busco_ch = busco_summ.filter { id, stage, f -> stage == final_busco_stage }
                                     .map    { id, stage, f -> tuple(id, f) }
 
         quast_cp_ch = QUAST_ORGANELLE.out.report
@@ -525,7 +653,19 @@ workflow {
         // Decontam FASTA + audit table are optional (only when --flag_contaminants); same
         // remainder:true + null-check idiom as blob_ch. Sylph corroboration likewise optional.
         decontam_pkg_ch = has_decontam ? decontam_final : Channel.empty()
-        contam_audit_ch = has_decontam ? CLASSIFY_CONTAMINANTS.out.audit : Channel.empty()
+        removed_pkg_ch  = (has_decontam && !params.fcs_screen) ? REMOVE_CONTAMINANTS.out.removed : Channel.empty()
+        contam_audit_ch = params.fcs_screen ? final_decisions_ch
+                        : has_decontam ? CLASSIFY_CONTAMINANTS.out.audit : Channel.empty()
+        // Final-genome AGP, flagged genome, trim log and screens; only with --fcs_screen.
+        final_set_ch    = params.fcs_screen
+            ? final_extras_ch
+                .join(FCS_GX_FULL.out.report.map { id, stage, f -> tuple(id, f) })
+                .join(last_gx_ch)
+                .join(FCS_ADAPTOR_FULL.out.report.map { id, stage, f -> tuple(id, f) })
+                .join(last_adaptor_ch)
+                .join(NCBI_SCREEN_SUMMARY.out.summary)
+                .map { row -> tuple(row[0], row[1..-1]) }
+            : Channel.empty()
         sylph_pkg_ch    = params.verify_sylph ? SYLPH_VERIFY_CONTAMINANTS.out.corroboration : Channel.empty()
         blast_pkg_ch    = params.verify_blast ? BLAST_VERIFY_CONTAMINANTS.out.corroboration : Channel.empty()
 
@@ -540,20 +680,23 @@ workflow {
             .join(final_busco_ch)
             .join(blob_ch, remainder: true)
             .join(decontam_pkg_ch, remainder: true)
+            .join(removed_pkg_ch, remainder: true)
             .join(contam_audit_ch, remainder: true)
             .join(sylph_pkg_ch, remainder: true)
             .join(blast_pkg_ch, remainder: true)
+            .join(final_set_ch, remainder: true)
             .combine(TOOLS_REPORT.out)
-            .map { id, summary, scaffold, agp, cp, mt, qn, qcp, qmt, busco, blob, decontam, audit, sylph, blast, tools ->
+            .map { id, summary, scaffold, agp, cp, mt, qn, qcp, qmt, busco, blob, decontam, removed, audit, sylph, blast, final_set, tools ->
                 def hasBlob     = (blob != null)
                 def hasDecontam = (decontam != null)
                 def hasSylph    = (sylph != null)
                 def hasBlast    = (blast != null)
                 tuple(id, summary, tools, scaffold, agp, cp, mt, qn, qcp, qmt, busco,
                       hasBlob ? blob : [], hasBlob,
-                      hasDecontam ? decontam : [], hasDecontam ? audit : [], hasDecontam,
+                      hasDecontam ? decontam : [], removed != null ? removed : [], hasDecontam ? audit : [], hasDecontam,
                       hasSylph ? sylph : [], hasSylph,
-                      hasBlast ? blast : [], hasBlast)
+                      hasBlast ? blast : [], hasBlast,
+                      final_set != null ? final_set : [], final_set != null)
             }
         PACKAGE_RESULTS(package_in)
     }

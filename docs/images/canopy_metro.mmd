@@ -1,0 +1,127 @@
+%%metro title: Canopy
+%%metro style: seqera
+%%metro file: reads_in | FASTQ
+%%metro file: organelles_out | FASTA
+%%metro file: final_out | FASTA
+%%metro file: zip_out | ZIP
+%%metro line: nuclear | Nuclear genome (default final: Medaka candidate) | #2db572
+%%metro line: purge | Purged candidate (compared, or final with --final_assembly purge) | #17a2a2
+%%metro line: hapdup | Phasing (--run_hapdup) | #8d99ae | dashed
+%%metro line: cp | Chloroplast | #0570b0
+%%metro line: mt | Mitochondria | #f5a623
+%%metro line: oatk | Organelles with --organelle_assembler oatk | #8e44ad | dashed
+%%metro line: fcs | NCBI screening and evidence rule (--fcs_screen) | #e63946
+%%metro line: advisory | Report-only checks (--run_qualimap, --verify_sylph) | #c77dff | dashed
+%%metro grid: reads | 0,0
+%%metro grid: nuclear_asm | 1,0
+%%metro grid: organelles | 0,1
+%%metro grid: screening | 1,1
+%%metro grid: final | 1,2
+%%metro legend: bl
+
+graph LR
+    subgraph reads [Read preparation]
+        %%metro number: 1
+        %%metro exit: right | nuclear, purge, hapdup
+        %%metro exit: bottom | cp, mt
+        %%metro exit: bottom | oatk
+        reads_in[ ]
+        nanoplot[NanoPlot]
+        filtlong[Filtlong]
+        map_org[minimap2]
+        partition[samtools]
+
+        reads_in -->|nuclear,purge,hapdup,cp,mt,oatk| nanoplot
+        nanoplot -->|nuclear,purge,hapdup,cp,mt,oatk| filtlong
+        filtlong -->|nuclear,purge,hapdup,cp,mt| map_org
+        map_org -->|nuclear,purge,hapdup,cp,mt| partition
+    end
+
+    subgraph nuclear_asm [Nuclear assembly]
+        %%metro number: 3
+        %%metro entry: left | nuclear, purge, hapdup
+        %%metro exit: bottom | nuclear, fcs, advisory
+        flye_nuc[Flye]
+        medaka_nuc[Medaka]
+        purge_step[purge_dups]
+        hapdup_step[HapDup]
+        ragtag[RagTag]
+        select[Select final]
+
+        flye_nuc -->|nuclear,purge,hapdup| medaka_nuc
+        medaka_nuc -->|purge,hapdup| purge_step
+        purge_step -->|hapdup| hapdup_step
+        purge_step -->|purge| ragtag
+        medaka_nuc -->|nuclear| ragtag
+        ragtag -->|nuclear,purge| select
+    end
+
+    subgraph organelles [Organelle assembly]
+        %%metro number: 2
+        %%metro entry: top | cp, mt, oatk
+        dedup[seqkit]
+        flye_org[Flye]
+        oatk_asm[Oatk + Bandage]
+        filter_org[Reference filter]
+        medaka_org[Medaka]
+        quast_org[QUAST]
+        organelles_out[ ]
+
+        dedup -->|cp,mt| flye_org
+        flye_org -->|cp,mt| filter_org
+        oatk_asm -->|oatk| filter_org
+        filter_org -->|cp,mt,oatk| medaka_org
+        medaka_org -->|cp,mt,oatk| quast_org
+        quast_org -->|cp,mt,oatk| organelles_out
+    end
+
+    subgraph screening [Contaminant evidence]
+        %%metro number: 4
+        %%metro entry: top | nuclear, fcs, advisory
+        %%metro exit: bottom | nuclear, fcs
+        map_final[minimap2]
+        qualimap[Qualimap]
+        kraken[Kraken2]
+        blob[BlobTools]
+        classify[Kraken rule]
+        sylph[Sylph]
+        blast[BLASTn]
+        fcs_full[FCS-GX, FCS-adaptor]
+        fungi[Align to fungi]
+        rule[Decision rule]
+
+        map_final -->|advisory| qualimap
+        map_final -->|nuclear| kraken
+        kraken -->|nuclear| blob
+        blob -->|nuclear| classify
+        classify -->|advisory| sylph
+        classify -->|nuclear| blast
+        blast -->|nuclear| rule
+        fcs_full -->|fcs| fungi
+        fungi -->|fcs| rule
+    end
+
+    subgraph final [Final genomes and reports]
+        %%metro number: 5
+        %%metro direction: RL
+        %%metro entry: top | nuclear, fcs
+        write[Write genomes, trim adaptors]
+        rescreen[FCS re-screen]
+        final_qc[QUAST, BUSCO]
+        report[MultiQC + report]
+        final_out[ ]
+        zip_out[ ]
+
+        write -->|nuclear,fcs| rescreen
+        rescreen -->|nuclear,fcs| final_qc
+        final_qc -->|nuclear,fcs| report
+        report -->|nuclear| final_out
+        report -->|fcs| zip_out
+    end
+
+    partition -->|nuclear,purge,hapdup| flye_nuc
+    partition -->|cp,mt| dedup
+    filtlong -->|oatk| oatk_asm
+    select -->|nuclear,advisory| map_final
+    select -->|fcs| fcs_full
+    rule -->|nuclear,fcs| write

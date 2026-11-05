@@ -28,16 +28,16 @@ run_sample() {
         --cp_ref "${PROJECT_DIR}/refs/sorghum/sorghum_cp_NC008602.fasta" \
         --mt_ref "${PROJECT_DIR}/refs/sorghum/sorghum_mt_NC008360.fasta" \
         --nuclear_ref "${PROJECT_DIR}/refs/sorghum/Sbicolor_730_v5.0.fa" \
-        --outdir "${PROJECT_DIR}/results_${sample}" \
+        --outdir "${PROJECT_DIR}/results_${sample}${OUTDIR_SUFFIX:-}" \
         -w "${PROJECT_DIR}/nf-work-${sample}" \
-        --organelle_assembler oatk \
+        --organelle_assembler flye \
         --run_qualimap true \
         --run_blobtools true \
         --run_kraken2 true \
         --flag_contaminants true \
         --verify_sylph true \
         --verify_blast true \
-        --blast_remote true \
+        --fcs_screen true \
         --final_assembly "${FINAL_ASSEMBLY:-medaka}" \
         -resume
     echo "=== Finished ${sample} ==="

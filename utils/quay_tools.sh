@@ -1,18 +1,21 @@
 #!/bin/bash
-# Helpers for finding and verifying quay.io biocontainer images.
+# Helpers for finding and verifying quay.io biocontainer images before changing a
+# `container` directive in modules/. Requires curl and python3; verify_image also needs apptainer.
+#
+# Usage: source utils/quay_tools.sh
 #
 # Functions:
-#   quay_tags <tool> [limit]            — list available tags via API (fast)
-#   image_exists <image>                — check tag exists via API (fast, no download)
-#   verify_image <image> [cmd]          — actually pull image; optionally run cmd inside
+#   quay_tags <tool> [limit]     list available tags via the API (fast)
+#   image_exists <image>         check a tag exists via the API (fast, no download)
+#   verify_image <image> [cmd]   pull the image into a temporary SIF, optionally run cmd inside,
+#                                then discard it (slow; run it on the kind of node that will use it)
 #
 # Examples:
-# Check pullability AND that medaka_consensus works:
-#   check_image quay.io/biocontainers/medaka:2.2.1--py310h237e959_0 "medaka --version"
-# For Flye:
-#   check_image quay.io/biocontainers/flye:2.9.6--py313h7fbb527_1 "flye --version"
+#   quay_tags flye 10
+#   image_exists quay.io/biocontainers/flye:2.9.4--py310h2b6aa90_0
+#   verify_image quay.io/biocontainers/flye:2.9.4--py310h2b6aa90_0 "flye --version"
 #
-# Tip: set VERIFY_VERBOSE=1 to see errors from verify_image.
+# Set VERIFY_VERBOSE=1 to see pull errors from verify_image.
 
 quay_tags() {
     local tool="$1"
@@ -54,6 +57,7 @@ verify_image() {
     local verbose=${VERIFY_VERBOSE:-0}
     local tmpdir="${APPTAINER_TMPDIR:-${HOME}/.apptainer_cache}"
     local sif
+    mkdir -p "$tmpdir"
     sif=$(mktemp "${tmpdir}/check.XXXXXX.sif")
 
     if [[ "$verbose" == "1" ]]; then

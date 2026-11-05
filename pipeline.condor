@@ -17,9 +17,9 @@ arguments      = $(sample)
 initialdir     = /mnt/cephfs/linuxhome/benucci/Canopy
 getenv         = true
 
-output         = condor_logs/pipeline_$(sample).condor.out
-error          = condor_logs/pipeline_$(sample).condor.err
-log            = condor_logs/pipeline_$(sample).condor.log
+output         = condor_logs/pipeline_$(sample)$ENV(OUTDIR_SUFFIX:).condor.out
+error          = condor_logs/pipeline_$(sample)$ENV(OUTDIR_SUFFIX:).condor.err
+log            = condor_logs/pipeline_$(sample)$ENV(OUTDIR_SUFFIX:).condor.log
 
 # Keep the job in the queue (held) if it exits non-zero so the failure is
 # inspectable rather than silently leaving the queue.

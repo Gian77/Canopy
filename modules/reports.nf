@@ -1,14 +1,13 @@
 // Human-readable final summary.
 // Pulls the key metrics from NanoPlot (read set), QUAST (nuclear assembly), and
-// BUSCO (completeness) into one markdown table per sample. Reporting only —
-// errorStrategy 'ignore' so a missing/odd input never fails the pipeline.
+// BUSCO (completeness) into one markdown table per sample. The report is a deliverable, so a
+// failure here fails the run rather than exiting 0 with no summary or package.
 // Reuses the already-pulled multiqc image (has bash/grep/awk/python).
 
 process FINAL_SUMMARY {
     tag           { sample_id }
     label         'qc'
-    errorStrategy 'ignore'
-    publishDir    { "${params.outdir}/reports/${sample_id}" }, mode: 'symlink'
+    publishDir    { "${params.outdir}/reports/${sample_id}" }, mode: 'copy'
     container     'quay.io/biocontainers/multiqc:1.25.1--pyhdfd78af_0'
 
     input:
@@ -24,7 +23,8 @@ process FINAL_SUMMARY {
           path(busco_decontam,  stageAs: 'busco_decontam_summary.txt'),
           path(contam_summary,  stageAs: 'contam_summary.txt'),
           path(sylph_summary,   stageAs: 'sylph_summary.txt'),
-          path(blast_summary,   stageAs: 'blast_summary.txt')
+          path(blast_summary,   stageAs: 'blast_summary.txt'),
+          path(ncbi_screen,     stageAs: 'ncbi_screen.txt')
 
     output:
     tuple val(sample_id), path("${sample_id}_assembly_summary.md"), emit: summary
@@ -39,7 +39,8 @@ process FINAL_SUMMARY {
     def decontam_ran  = params.flag_contaminants
     def sylph_ran     = params.verify_sylph
     def blast_ran     = params.verify_blast
-    def blast_source  = params.blast_db ? 'supplied local NCBI BLAST database' : 'NCBI remote BLAST service'
+    def fcs_ran       = params.fcs_screen
+    def blast_source  = "local BLAST database ${file(params.blast_db).name}"
     """
     #!/usr/bin/env bash
     set -uo pipefail
@@ -54,8 +55,12 @@ process FINAL_SUMMARY {
     CONTAM_SUMMARY="contam_summary.txt"
     SYLPH_SUMMARY="sylph_summary.txt"
     BLAST_SUMMARY="blast_summary.txt"
+    NCBI_SCREEN="ncbi_screen.txt"
+    ncbi() { grep "^\$1=" "\$NCBI_SCREEN" 2>/dev/null | cut -d= -f2 || true; }
     # Headline BUSCO = the published final genome's (default medaka).
     if [ "${final_asm}" = "purge" ]; then BUSCO="\$BUSCO_PURGE"; else BUSCO="\$BUSCO_MEDAKA"; fi
+    # When contaminants were removed, the decontam genome is the published nuclear genome.
+    if [ "${decontam_ran}" = "true" ]; then BUSCO="\$BUSCO_DECONTAM"; fi
     CUTOFFS="${purge_cutoffs}"
     CALCUTS="${purge_calcuts_log}"
     RAGTAG="${ragtag_stats}"
@@ -78,7 +83,14 @@ process FINAL_SUMMARY {
         ' "\$QUAST" 2>/dev/null
     }
 
+    # QUAST ignores an empty assembly and writes only the reference column, whose values
+    # must not be reported as if they described the assembly.
+    org_has_assembly() {
+        awk -F'\t' 'NR==1 { exit (NF >= 3 ? 0 : 1) }' "\$1" 2>/dev/null
+    }
+
     orgrow() {
+        org_has_assembly "\$2" || return 0
         awk -F'\t' -v m="\$1" '\$1==m { printf "| **%s** |", \$1; for(i=2;i<=NF;i++) printf " %s |", \$i; print ""; exit }' "\$2" 2>/dev/null
     }
 
@@ -89,6 +101,10 @@ process FINAL_SUMMARY {
     org_interp() {
         local label="\$1" report="\$2"
         local contigs length reference n50
+        if ! org_has_assembly "\$report"; then
+            echo "\$label: **no assembly was produced**; this compartment is missing, not complete."
+            return 0
+        fi
         contigs=\$(orgval "# contigs" "\$report")
         length=\$(orgval "Total length" "\$report")
         reference=\$(orgval "Reference length" "\$report")
@@ -96,7 +112,9 @@ process FINAL_SUMMARY {
         awk -v label="\$label" -v c="\$contigs" -v l="\$length" -v r="\$reference" -v n="\$n50" 'BEGIN {
             c=c+0; l=l+0; r=r+0; n=n+0
             if (r > 0) pct=100*l/r; else pct=0
-            if (c <= 1 && pct >= 95)
+            if (pct > 110)
+                msg="assembly is longer than the supplied reference -- check for duplicated sequence"
+            else if (c <= 1 && pct >= 95)
                 msg="near-complete single-contig assembly"
             else if (pct >= 95)
                 msg="near-reference-length assembly with multiple contigs"
@@ -109,6 +127,7 @@ process FINAL_SUMMARY {
     }
 
     orgheader() {
+        org_has_assembly "\$1" || return 0
         awk -F'\t' 'NR==1 { printf "| Metric |"; for(i=2;i<=NF;i++) printf " **%s** |", \$i; print ""; printf "|---|"; for(i=2;i<=NF;i++) printf "---|"; print "" }' "\$1" 2>/dev/null
     }
 
@@ -151,6 +170,11 @@ process FINAL_SUMMARY {
         N50_SCAFFOLD=\$(qval "N50" "medaka_scaf")
         MISASM_SCAFFOLD=\$(qval "# misassemblies" "medaka_scaf")
     fi
+    if [ "${decontam_ran}" = "true" ]; then
+        GFRAC_SCAFFOLD="\$GFRAC_DECONTAM"
+        N50_SCAFFOLD="\$N50_DECONTAM"
+        MISASM_SCAFFOLD=\$(qval "# misassemblies" "decontam")
+    fi
 
     COVERAGE=\$(echo "${gsize}" | awk '{
         s=tolower(\$0)
@@ -192,6 +216,14 @@ process FINAL_SUMMARY {
     CONTAM_BASES=\$(grep '^bases_removed='        "\$CONTAM_SUMMARY" 2>/dev/null | cut -d= -f2 || echo 0)
     CONTAM_PHYLA=\$(grep '^phyla_detected='       "\$CONTAM_SUMMARY" 2>/dev/null | cut -d= -f2 || echo "none")
     CONTAM_MB=\$(echo "\$CONTAM_BASES" | awk '{printf "%.2f", \$1/1e6}')
+    REVIEW_CONTIGS=\$(grep '^review_contigs=' "\$CONTAM_SUMMARY" 2>/dev/null | cut -d= -f2 || echo 0)
+    REVIEW_BASES=\$(grep '^review_bases='     "\$CONTAM_SUMMARY" 2>/dev/null | cut -d= -f2 || echo 0)
+    REVIEW_MB=\$(echo "\$REVIEW_BASES" | awk '{printf "%.2f", \$1/1e6}')
+    # Removed contigs are always unplaced, so take them out of the anchoring percentage.
+    if [ "${decontam_ran}" = "true" ]; then
+        UNPLACED_MB=\$(awk -F'\\t' -v r="\$CONTAM_BASES" 'NR==2 {printf "%.0f", (\$4-r)/1e6}' "\$RAGTAG" 2>/dev/null || echo 0)
+        PLACED_PCT=\$(echo "\$PLACED_MB \$UNPLACED_MB" | awk '{t=\$1+\$2; if(t>0) printf "%.0f", \$1/t*100; else print "NA"}')
+    fi
 
     # Sylph corroboration counts (only meaningful when sylph_ran).
     SYLPH_CORROBORATED=\$(grep '^sylph_corroborated='      "\$SYLPH_SUMMARY" 2>/dev/null | cut -d= -f2 || echo 0)
@@ -201,11 +233,13 @@ process FINAL_SUMMARY {
 
     PEAK=\$(grep "autotune" "\$CALCUTS" 2>/dev/null | grep -o 'Peak: [0-9]*x' | grep -o '[0-9]*' || echo "unknown")
 
-    QUALITY_TIER=\$(awk -v c="\$BUSCO_C" -v gf="\$GFRAC_SCAFFOLD" -v n50="\$N50_SCAFFOLD" 'BEGIN {
+    # Contiguity is scored on the Flye contig N50: scaffold N50 reflects RagTag placement against
+    # the reference, so it looks chromosome-scale for any assembly that can be anchored.
+    QUALITY_TIER=\$(awk -v c="\$BUSCO_C" -v gf="\$GFRAC_SCAFFOLD" -v n50="\$N50_FLYE" 'BEGIN {
         c=c+0; gf=gf+0; n50=n50+0; score=0
         if (c  >= 95) score+=2; else if (c  >= 90) score++
         if (gf >= 80) score+=2; else if (gf >= 60) score++
-        if (n50 >= 20000000) score+=2; else if (n50 >= 5000000) score++
+        if (n50 >= 1000000) score+=2; else if (n50 >= 100000) score++
         if (score >= 5) print "high"
         else if (score >= 3) print "moderate"
         else print "low"
@@ -281,7 +315,7 @@ process FINAL_SUMMARY {
             else if (pct >= 50) anch="moderate anchoring"
             else                anch="low anchoring -- many contigs unplaced, possibly from highly divergent or novel sequence"
             fold=int(n50s/n50c)
-            printf "%s (%d%% of bases placed on chromosomes). N50 improved %d-fold: %.1f kb (contigs) -> %.1f Mb (scaffolds).", anch, pct, fold, n50c/1e3, n50s/1e6
+            printf "%s (%d%% of bases placed on chromosomes). Flye contig N50 is %.1f kb; scaffold N50 is %.1f Mb because RagTag orders contigs along the reference, so it does not measure assembly contiguity.", anch, pct, n50c/1e3, n50s/1e6
         }'
     }
 
@@ -326,7 +360,7 @@ process FINAL_SUMMARY {
       # ── 2. Organelle assemblies ──────────────────────────────────────────
       echo "## 2. Organelle assemblies (QUAST)"
       echo
-      echo "Organelle assemblies were filtered against the supplied references and polished with Medaka before evaluation."
+      echo "Organelle assemblies were built with ${params.organelle_assembler}, filtered against the supplied references and polished with Medaka before evaluation."
       echo
       echo "### Chloroplast"
       echo
@@ -356,6 +390,10 @@ process FINAL_SUMMARY {
       # ── 3. Nuclear assembly progression ──────────────────────────────────
       echo "## 3. Nuclear assembly progression (QUAST)"
       echo
+      if [ "${decontam_ran}" = "true" ]; then
+          echo "The **decontam** column is the published nuclear genome; the other assembly columns still contain the contigs removed in section 7."
+          echo
+      fi
       qheader
       qrow "# contigs"
       qrow "Total length"
@@ -403,20 +441,27 @@ process FINAL_SUMMARY {
       echo
       echo "| | Sequences | Bases |"
       echo "|---|---|---|"
-      awk -F'\\t' 'NR==2 {
+      awk -F'\\t' -v rn="\${CONTAM_FLAGGED:-0}" -v rb="\${CONTAM_BASES:-0}" 'NR==2 {
           placed_mb   = sprintf("%.1f Mb", \$2/1e6);
-          unplaced_mb = sprintf("%.1f Mb", \$4/1e6);
+          unplaced_mb = sprintf("%.1f Mb", (\$4-rb)/1e6);
           gap_kb      = sprintf("%.1f kb", \$5/1e3);
           printf "| Placed on chromosomes | %s | %s |\\n", \$1, placed_mb;
-          printf "| Unplaced              | %s | %s |\\n", \$3, unplaced_mb;
+          printf "| Unplaced, kept        | %d | %s |\\n", \$3-rn, unplaced_mb;
+          if (rn+0 > 0) printf "| Unplaced, removed as contaminant | %d | %.1f Mb |\\n", rn, rb/1e6;
           printf "| N-gaps introduced     | %s | %s |\\n", \$6, gap_kb
       }' "\$RAGTAG" 2>/dev/null || echo "| NA | NA | NA |"
       echo
       echo "> **Interpretation:** \$(scaffold_interp)"
       echo
+      if [ "${fcs_ran}" = "true" ]; then
+          echo "> Contig N50 of the published genome, after RagTag correction and adapter trimming: \$(ncbi final_contig_n50 | awk '{printf "%.1f kb", \$1/1e3}') across \$(ncbi final_contigs) contigs."
+          echo
+      fi
+      echo "> **Note on reference-guided scaffolding:** chromosome scaffolds take their order and orientation from the reference (Sbicolor v5), and every join is a fixed 100 bp gap of unknown true size. **Inversions and rearrangements relative to the reference get hidden**, so these scaffolds cannot be used as evidence of chromosome structure in this line. RagTag correction also broke contigs where they disagreed with the reference, without read support for each break, which may have split real structural differences."
+      echo
 
       # ── 6. BUSCO (nuclear genome) ─────────────────────────────────────────
-      echo "## 6. Nuclear gene-space completeness (BUSCO — ${busco_lin})"
+      echo "## 6. Published nuclear genome: gene-space completeness (BUSCO — ${busco_lin})"
       echo
       echo '```'
       grep -E "C:|Complete|Fragmented|Missing|Total BUSCO" "\$BUSCO" 2>/dev/null | sed 's/^[[:space:]]*//' || echo "NA"
@@ -425,49 +470,64 @@ process FINAL_SUMMARY {
       echo "> **Interpretation:** \$(busco_interp)"
       echo
 
-      # ── 6. Contaminant screening (only when --flag_contaminants ran) ───────
+      # ── 7. Contaminant screening (only when --flag_contaminants ran) ───────
       if [ "${decontam_ran}" = "true" ]; then
-          echo "## 7. Contaminant screening (BlobTools + RagTag + GC)"
+          if [ "${fcs_ran}" = "true" ]; then
+              echo "## 7. Contaminant screening (FCS-GX, Kraken2, BLASTn, fungal alignment; GC and coverage as support)"
+          else
+              echo "## 7. Contaminant screening (BlobTools + RagTag + reference alignment)"
+          fi
           echo
           echo "| Metric | Value |"
           echo "|---|---|"
-          echo "| Contigs flagged as contaminant | \$CONTAM_FLAGGED |"
+          echo "| Contigs removed from the nuclear genome | \$CONTAM_FLAGGED |"
           echo "| Total bases removed | \${CONTAM_MB} Mb |"
           echo "| Non-target phyla detected | \$CONTAM_PHYLA |"
-          echo "| Decontam genome fraction | \${GFRAC_DECONTAM}% |"
-          echo "| Decontam N50 | \$(echo \$N50_DECONTAM | awk '{printf "%.1f Mb", \$1/1e6}') |"
-          echo "| Decontam BUSCO complete / duplicated | \${BUSCO_C_DECONTAM}% / \${BUSCO_D_DECONTAM}% |"
+          echo "| Contigs kept but listed for review | \$REVIEW_CONTIGS (\${REVIEW_MB} Mb) |"
+          echo "| Published nuclear genome size | \$(echo \$LEN_DECONTAM | awk '{printf "%.1f Mb", \$1/1e6}') |"
+          echo "| Published genome fraction | \${GFRAC_DECONTAM}% |"
+          echo "| Published scaffold N50 | \$(echo \$N50_DECONTAM | awk '{printf "%.1f Mb", \$1/1e6}') |"
+          echo "| Published BUSCO complete / duplicated | \${BUSCO_C_DECONTAM}% / \${BUSCO_D_DECONTAM}% |"
           if [ "${sylph_ran}" = "true" ]; then
-              echo "| Sylph-corroborated (independent ANI vs GTDB) | \$SYLPH_CORROBORATED / \$SYLPH_TOTAL |"
+              echo "| Removed or review contigs matched by Sylph (ANI vs GTDB) | \$SYLPH_CORROBORATED / \$SYLPH_TOTAL |"
           fi
           if [ "${blast_ran}" = "true" ]; then
-              echo "| BLASTn-corroborated (identity + query coverage) | \$BLAST_CORROBORATED / \$BLAST_TOTAL |"
+              echo "| Removed or review contigs passing BLASTn thresholds | \$BLAST_CORROBORATED / \$BLAST_TOTAL |"
           fi
           echo
-          echo "> **Interpretation:** \$CONTAM_FLAGGED contigs (\${CONTAM_MB} Mb) were flagged as" \
-               "contaminant -- simultaneously non-${params.contam_target_phylum} by BlobTools," \
-               "unplaced by RagTag, and outside the ${params.contam_gc_min}-${params.contam_gc_max}" \
-               "GC fraction typical of eukaryotic nuclear sequence. See qc/contamination/ for the" \
-               "full per-contig audit table before trusting this genome version, given known" \
-               "Kraken2 long-contig misclassification risk on assembled scaffolds."
+          if [ "${fcs_ran}" = "true" ]; then
+              echo "> **Interpretation:** \$CONTAM_FLAGGED unplaced contigs (\${CONTAM_MB} Mb) were removed from ${sample}_final.fasta and stay marked in ${sample}_full_flagged.fasta. A contig is removed when FCS-GX says EXCLUDE; FCS-GX says REVIEW and another source agrees; the Kraken2 rule says remove and BLASTn corroborates it; at least ${params.contam_min_fungal_frac} of it aligns to a fungal reference with under ${params.contam_max_ref_aligned} aligned to sorghum; or BLASTn corroborates a non-plant hit with under ${params.contam_max_ref_aligned} aligned to sorghum. Removed by rule: \$(grep '^removed_by_rule=' "\$CONTAM_SUMMARY" | cut -d= -f2). Contigs placed on chromosomes are never removed automatically; those with an FCS-GX call: \$(grep '^placed_with_fcs_call=' "\$CONTAM_SUMMARY" | cut -d= -f2). \$REVIEW_CONTIGS contigs (\${REVIEW_MB} Mb) with conflicting evidence remain in the genome, marked 'review' in ${sample}_contig_decisions.tsv."
+              echo
+              echo "> **GC and coverage** are recorded for every sequence and support interpretation but do not trigger removal: GC alone would remove real plant contigs, and contaminant coverage overlaps plant coverage."
+              echo
+              echo "> **NCBI screens of ${sample}_final.fasta (status \$(ncbi screen_status)):** FCS-GX EXCLUDE \$(ncbi gx_exclude), other FCS-GX actions \$(ncbi gx_other_actions), FCS-adaptor hits \$(ncbi adaptor_hits). Before this check, \$(ncbi adapter_bases_trimmed) bp of adapter and flanking sequence were trimmed from \$(ncbi adapter_contig_ends_trimmed) contigs (${sample}_adapter_trims.tsv). FCS-GX database build \$(ncbi gx_db_build), the latest available; NCBI may screen with a newer one, so a pass here is strong evidence rather than a guarantee of acceptance."
+          else
+          echo "> **Interpretation:** \$CONTAM_FLAGGED contigs (\${CONTAM_MB} Mb) were moved out of" \
+               "the nuclear genome into ${sample}_removed_contigs.fasta -- simultaneously" \
+               "non-${params.contam_target_phylum} by BlobTools, unplaced by RagTag, and under" \
+               "${params.contam_max_ref_aligned} of the contig aligned to the nuclear reference." \
+               "\$REVIEW_CONTIGS unplaced, unaligned contigs (\${REVIEW_MB} Mb) with no taxonomy call" \
+               "remain in the nuclear genome and need review (${sample}_review_contigs.txt). The" \
+               "audit table gives the decision for every contig."
+          fi
           if [ "${sylph_ran}" = "true" ]; then
               echo
-              echo "> Sylph corroboration: \$SYLPH_CORROBORATED of \$SYLPH_TOTAL flagged contigs" \
-                   "also had a confident (>=${params.sylph_min_ani}% adjusted ANI) containment" \
-                   "match to a real GTDB reference genome -- an independent method agreeing with" \
-                   "Kraken2's taxonomy call. See qc/contamination/*_sylph_corroboration.tsv for" \
-                   "per-contig detail. This is advisory only and did not change what was removed." \
-                   "Note: short contigs (a few kb) may show 'no' simply because there isn't" \
-                   "enough sequence for a confident ANI estimate at Sylph's default sketch" \
-                   "density -- that is not the same as Sylph actively disagreeing with Kraken2."
+              echo "> Sylph corroboration: \$SYLPH_CORROBORATED of \$SYLPH_TOTAL removed or review contigs" \
+                   "had a confident (>=${params.sylph_min_ani}% adjusted ANI) containment match to a" \
+                   "bacterial or archaeal GTDB genome. See the Sylph table for per-contig detail." \
+                   "GTDB has no fungi, so Sylph cannot confirm fungal contigs." \
+                   "This is advisory only and did not change what was removed. A 'no' is not" \
+                   "disagreement: short contigs may lack enough sequence for an ANI estimate, and" \
+                   "taxa without a close GTDB genome cannot match."
           fi
           if [ "${blast_ran}" = "true" ]; then
               echo
-              echo "> BLASTn corroboration: \$BLAST_CORROBORATED of \$BLAST_TOTAL flagged contigs" \
+              echo "> BLASTn corroboration: \$BLAST_CORROBORATED of \$BLAST_TOTAL removed or review contigs" \
                    "met the configured identity (>=${params.blast_min_identity}%) and query-coverage" \
-                   "(>=${params.blast_min_qcov}%) thresholds against the ${blast_source}." \
-                   "This is advisory only and did not change what was removed. See" \
-                   "qc/contamination/*/blast/ for per-hit details."
+                   "(>=${params.blast_min_qcov}%) thresholds against the ${blast_source}, with coverage" \
+                   "summed across all alignments to the best subject. A 'no' is not disagreement: a contig without a close" \
+                   "complete genome in the database can miss the coverage threshold, so read the" \
+                   "best_title column of the BLAST table."
           fi
           echo
       fi
@@ -477,13 +537,20 @@ process FINAL_SUMMARY {
       echo
       echo "## Conclusion"
       echo
-      echo "The **${sample}** nuclear genome assembly is of **\${QUALITY_TIER} overall quality** based on BUSCO completeness (\${BUSCO_C}%), scaffold N50 (\${N50_SCAFFOLD} bp), and reference genome fraction (\${GFRAC_SCAFFOLD}%)."
+      if [ "${fcs_ran}" = "true" ]; then
+          echo "**Use ${sample}_final.fasta as the nuclear genome.** It excludes the \$CONTAM_FLAGGED contaminant contigs (\${CONTAM_MB} Mb) and has adapters trimmed from contig ends. ${sample}_full_flagged.fasta holds every contig, trimmed the same way, with the decision in each header. The headline contig N50 below is measured on the Flye assembly before these steps; section 5 gives the published genome's value."
+          echo
+      elif [ "${decontam_ran}" = "true" ]; then
+          echo "**Use ${sample}_nuclear.fasta as the nuclear genome.** It excludes the \$CONTAM_FLAGGED contigs (\${CONTAM_MB} Mb) in ${sample}_removed_contigs.fasta and still contains the \$REVIEW_CONTIGS review contigs (\${REVIEW_MB} Mb). The figures below describe this genome, except the contig N50, which is measured on the Flye assembly before removal."
+          echo
+      fi
+      echo "The **${sample}** nuclear genome assembly is of **\${QUALITY_TIER} overall quality** based on BUSCO completeness (\${BUSCO_C}%), contig N50 (\${N50_FLYE} bp), and reference genome fraction (\${GFRAC_SCAFFOLD}%). Scaffold N50 (\${N50_SCAFFOLD} bp) reflects placement against the reference, so it is not independent evidence of contiguity or chromosome structure."
       echo
       PURGE_MB=\$(echo \$LEN_PURGE | awk '{printf "%.0f Mb", \$1/1e6}')
       if [ "${final_asm}" = "purge" ]; then
         HAPLO_SENTENCE="**Haplotig removal:** Purge_dups removed \${PURGE_REMOVED}% of the assembly (autotune peak: \${PEAK}x), retaining \${PURGE_MB}; the purged genome was adopted as final."
       else
-        HAPLO_SENTENCE="**Haplotig removal:** Purge_dups ran (would remove \${PURGE_REMOVED}%, autotune peak \${PEAK}x) but the Medaka (unpurged) genome was adopted as final -- see the section 3 comparison."
+        HAPLO_SENTENCE="**Haplotig removal:** Purge_dups ran (would remove \${PURGE_REMOVED}%, autotune peak \${PEAK}x) but the Medaka (unpurged) genome was adopted as final -- see the section 4 comparison."
       fi
       echo "**Sequencing:** \$COVERAGE ONT reads at mean quality Q\${MEAN_QUAL} (read N50 \${READ_N50} bp). **Assembly:** Flye produced \$NCONTIGS_FLYE contigs totalling \$(echo \$LEN_FLYE | awk '{printf "%.0f Mb", \$1/1e6}') from a \$(echo \$TOTAL_BASES | awk '{printf "%.1f Gb", \$1/1e9}') read set. **Polishing:** Medaka corrected base-level errors without structural changes. \${HAPLO_SENTENCE} **Scaffolding:** RagTag anchored \${PLACED_PCT}% of assembled bases to chromosomal positions using the reference, raising scaffold N50 to \$(echo \$N50_SCAFFOLD | awk '{printf "%.1f Mb", \$1/1e6}'). **Gene space:** BUSCO completeness \${BUSCO_C}% (${busco_lin}), with \${BUSCO_D}% duplication and \${BUSCO_M}% missing genes."
       echo
@@ -503,7 +570,9 @@ process FINAL_SUMMARY {
           if (rec != "")
               printf "**Suggestions:**\\n\\n%s\\n", rec
       }'
-      ${taxo_screened
+      ${decontam_ran
+        ? 'echo "_Contamination screening: see section 7. Kraken2, BlobTools, RagTag placement and reference alignment decide which contigs are removed; qc/kraken2/ and qc/blobtools/ hold the supporting output._"'
+        : taxo_screened
         ? 'echo "_Contamination screening: Kraken2 + BlobTools were run on the whole final assembly against PlusPFP (includes a plant reference, so host sequence should classify correctly); see qc/kraken2/ and qc/blobtools/ and judge non-Viridiplantae phyla on the blob plot as candidate contamination._"'
         : (screened
             ? 'echo "_Coverage-only BlobTools plot was run on the whole final assembly (qc/blobtools/) -- no taxonomy DB, just GC-vs-depth clustering. Enable --run_kraken2 for a taxonomy-based contamination screen._"'
@@ -513,14 +582,13 @@ process FINAL_SUMMARY {
 }
 
 // Bundles the small set of files worth downloading to sanity-check a run — the narrative
-// summary, final assembly + organelle FASTAs, the RagTag AGP (maps each sequence to the
-// reference chromosome it was placed on, or shows it as unplaced), QUAST/BUSCO reports, and
-// (when contamination screening ran) the unplaced-only blob plot — as one zip under reports/,
+// summary, the nuclear/chloroplast/mitochondria FASTAs, the removed contigs, the RagTag AGP (maps
+// each sequence to the reference chromosome it was placed on, or shows it as unplaced), QUAST/BUSCO
+// reports, and (when contamination screening ran) the blob plot and evidence tables — as one zip under reports/,
 // instead of someone having to hunt through the full (100+ GB) output directory over FileZilla.
 process PACKAGE_RESULTS {
     tag           { sample_id }
     label         'qc'
-    errorStrategy 'ignore'
     publishDir    { "${params.outdir}/reports/${sample_id}" }, mode: 'copy'
     container     'quay.io/biocontainers/multiqc:1.25.1--pyhdfd78af_0'
 
@@ -539,12 +607,15 @@ process PACKAGE_RESULTS {
           path(blob_pngs),
           val(has_blobplots),
           path(decontam_fasta, stageAs: 'decontam.fasta'),
+          path(removed_fasta,  stageAs: 'removed_contigs.fasta'),
           path(contam_audit,   stageAs: 'contamination_audit.tsv'),
           val(has_decontam),
           path(sylph_corroboration, stageAs: 'sylph_corroboration.tsv'),
           val(has_sylph),
           path(blast_corroboration, stageAs: 'blast_corroboration.tsv'),
-          val(has_blast)
+          val(has_blast),
+          path(final_set, stageAs: 'final_set/*'),
+          val(has_final)
 
     output:
     tuple val(sample_id), path("${sample_id}_assembly.zip"), emit: zip
@@ -556,8 +627,6 @@ process PACKAGE_RESULTS {
 
     cp ${assembly_summary} "\$PKG/${sample_id}_assembly_summary.md"
     cp ${tools_report}     "\$PKG/pipeline_tools.md"
-    cp final_scaffold.fasta "\$PKG/${sample_id}_nuclear_scaffold.fasta"
-    cp final_scaffold.agp   "\$PKG/${sample_id}_nuclear_scaffold.agp"
     cp chloroplast.fasta    "\$PKG/${sample_id}_chloroplast.fasta"
     cp mitochondria.fasta   "\$PKG/${sample_id}_mitochondria.fasta"
     cp ${quast_nuclear_dir}/report.html "\$PKG/quast_nuclear_report.html"
@@ -570,9 +639,33 @@ process PACKAGE_RESULTS {
         cp ${blob_pngs} "\$PKG/blobtools/" 2>/dev/null || true
     fi
 
-    if [ "${has_decontam}" = "true" ]; then
-        cp decontam.fasta            "\$PKG/${sample_id}_nuclear_decontam.fasta"
+    # The published nuclear genome excludes removed contigs when screening ran, and its AGP matches.
+    if [ "${has_final}" = "true" ]; then
+        cp decontam.fasta          "\$PKG/${sample_id}_final.fasta"
+        cp contamination_audit.tsv "\$PKG/${sample_id}_contig_decisions.tsv"
+        cp final_set/* "\$PKG/"
+        mkdir -p "\$PKG/screening"
+        mv "\$PKG"/*.fcs_gx_report.txt "\$PKG"/*.fcs_adaptor_report.txt "\$PKG/${sample_id}_ncbi_screen.txt" "\$PKG/screening/"
+    elif [ "${has_decontam}" = "true" ]; then
+        cp decontam.fasta            "\$PKG/${sample_id}_nuclear.fasta"
+        cp removed_contigs.fasta     "\$PKG/${sample_id}_removed_contigs.fasta"
         cp contamination_audit.tsv   "\$PKG/${sample_id}_contamination_audit.tsv"
+        awk -F'\\t' 'NR > 1 && \$8 == "review" { print \$1 }' contamination_audit.tsv > "\$PKG/${sample_id}_review_contigs.txt"
+        awk -F'\\t' 'NR == FNR { if (\$8 == "remove") drop[\$1] = 1; next } /^#/ || !(\$1 in drop)' \\
+            contamination_audit.tsv final_scaffold.agp > "\$PKG/${sample_id}_nuclear.agp"
+    else
+        cp final_scaffold.fasta      "\$PKG/${sample_id}_nuclear.fasta"
+        cp final_scaffold.agp        "\$PKG/${sample_id}_nuclear.agp"
+    fi
+
+    # The AGP must describe exactly the sequences in the published FASTA.
+    NAME=${sample_id}_nuclear
+    if [ "${has_final}" = "true" ]; then NAME=${sample_id}_final; fi
+    fasta_n=\$(grep -c '^>' "\$PKG/\$NAME.fasta")
+    agp_n=\$(awk -F'\\t' '!/^#/ && NF && !seen[\$1]++ { n++ } END { print n + 0 }' "\$PKG/\$NAME.agp")
+    if [ "\$fasta_n" != "\$agp_n" ]; then
+        echo "ERROR: \$NAME.fasta has \$fasta_n sequences but its AGP has \$agp_n objects" >&2
+        exit 1
     fi
 
     if [ "${has_sylph}" = "true" ]; then
@@ -589,16 +682,37 @@ ${sample_id} -- final results package
 
 ${sample_id}_assembly_summary.md   -- narrative QC summary (start here)
 pipeline_tools.md                  -- tool/version rationale for the whole pipeline
-${sample_id}_nuclear_scaffold.fasta -- final chromosome-scaffolded nuclear genome
-${sample_id}_nuclear_scaffold.agp   -- maps every sequence to the reference chromosome
+
+The genome files
+${sample_id}_final.fasta            -- nuclear genome to use: Medaka-polished, chromosome-scaffolded,
+                                       contaminants removed, adapters trimmed (with --fcs_screen;
+                                       otherwise this file is ${sample_id}_nuclear.fasta)
+${sample_id}_full_flagged.fasta     -- every contig, same sequence and IDs, with the decision and
+                                       evidence taxon in each header (with --fcs_screen)
+Note: scaffolds follow the reference with fixed 100 bp gaps, so inversions and rearrangements
+relative to the reference get hidden. '+' in sequence IDs was replaced with 'plus'.
+
+${sample_id}_chloroplast.fasta      -- chloroplast assembly
+${sample_id}_mitochondria.fasta     -- mitochondrial assembly
+${sample_id}_removed_contigs.fasta  -- removed contigs; only without --fcs_screen
+
+Supporting files
+${sample_id}_final.agp, _full_flagged.agp
+                                    -- maps every sequence to the reference chromosome
                                        RagTag placed it on (column 1 = "ChrNN_RagTag"),
                                        or shows it under its own contig name if unplaced.
-${sample_id}_chloroplast.fasta, ${sample_id}_mitochondria.fasta -- organelle genomes
+${sample_id}_contig_decisions.tsv   -- decision (keep/review/remove), rule, GC, coverage and evidence
+                                       per sequence (_contamination_audit.tsv without --fcs_screen)
+${sample_id}_adapter_trims.tsv      -- bases trimmed from each contig end
+screening/                          -- FCS-GX and FCS-adaptor reports, before ('full') and after
+                                       ('final') cleaning; 'final2' means a second cleaning round was
+                                       needed. _ncbi_screen.txt holds the outcome
+${sample_id}_sylph_corroboration.tsv, ${sample_id}_blast_corroboration.tsv
+                                    -- BLASTn and Sylph checks of candidate contigs. GTDB has no fungi.
 quast_*_report.html                 -- open in a browser; self-contained, no other files needed
-busco_nuclear_final_summary.txt     -- nuclear gene-space completeness for the published final genome
-blobtools/ (if present)             -- contamination-screen blob plot(s); "_unplaced" in the
-                                       filename means only contigs RagTag could NOT place on a
-                                       reference chromosome were screened (see assembly summary).
+busco_nuclear_final_summary.txt     -- gene-space completeness of ${sample_id}_nuclear.fasta
+blobtools/ (if present)             -- contamination-screen blob plot(s) of the genome before
+                                       contigs were removed
 EOF
 
     python3 -m zipfile -c "\${PKG}.zip" "\$PKG"
@@ -607,7 +721,6 @@ EOF
 
 process TOOLS_REPORT {
     label         'qc_light'
-    errorStrategy 'ignore'
     publishDir    "${params.outdir}/reports", mode: 'copy'
     container     'quay.io/biocontainers/multiqc:1.25.1--pyhdfd78af_0'
 
@@ -792,8 +905,34 @@ as PNG plots and TSV tables in the output directory.
 ### Kraken2 (--run_kraken2)
 Classifies each assembled contig of the final genome against the Kraken2 reference database
 (see Reference databases), assigning an NCBI taxon per contig. The per-contig taxids are written
-as a BlobTools "hits" file that colours the blob plot above. Judge real contaminants on the blob
-plot, where non-Viridiplantae phyla separate from the host cloud by GC and coverage.
+as a BlobTools "hits" file that colours the blob plot above and supplies the phylum call used for
+contaminant flagging.
+
+### FCS-GX and FCS-adaptor (--fcs_screen)
+NCBI's own screens, run on the full genome and again on the published FASTA. FCS-GX aligns against a
+large cross-species database and holds it in RAM (~470 GiB). FCS-GX EXCLUDE, or REVIEW with agreement
+from another source, removes an unplaced contig. FCS-adaptor hits are trimmed from contig ends, and a
+hit far from any contig end stops the run. Fungal alignment (minimap2) to --fungal_refs and BLASTn
+add evidence for contigs FCS-GX does not call; Kraken2 alone cannot see taxa absent from PlusPFP, such
+as Rhizopus. GC and coverage are recorded but do not trigger removal. Outputs: <sample>_final.fasta
+and <sample>_full_flagged.fasta. Without this option, the Kraken2 rule below decides removal.
+
+### Contaminant flagging (--flag_contaminants)
+A contig is removed from the nuclear genome only when it has a non-target phylum call, is unplaced
+by RagTag, and has under --contam_max_ref_aligned (default 0.10) of its length aligned to the
+nuclear reference (minimap2 -x asm20). Unplaced, unaligned contigs with no phylum call stay in the
+genome and are listed for review. Removed contigs are written whole to a separate FASTA, and the
+audit table records the decision and evidence for every contig. GC is recorded but not used: most
+contaminant sequence falls inside the GC range of plant contigs.
+
+### Sylph (--verify_sylph)
+Checks removed and review contigs by containment ANI against GTDB bacterial and archaeal genomes.
+Advisory only. It never changes removal, and short contigs may lack enough sequence to match.
+
+### BLASTn (--verify_blast)
+Searches removed and review contigs against a local nucleotide database, so assembly sequence is
+never sent to a remote service. Advisory only. Coverage is summed across all alignments to the
+best subject, and the best hit's title is reported for each contig.
 
 ---
 
@@ -849,6 +988,9 @@ Citations for each tool, in order of appearance, with project homepages.
 - **Qualimap** -- Okonechnikov K, et al. Qualimap 2: advanced multi-sample quality control for high-throughput sequencing data. Bioinformatics. 2016;32(2):292-294. <http://qualimap.conf.es>
 - **BlobTools** -- Laetsch DR, Blaxter ML. BlobTools: Interrogation of genome assemblies. F1000Research. 2017;6:1287. <https://github.com/DRL/blobtools>
 - **Kraken2** -- Wood DE, Lu J, Langmead B. Improved metagenomic analysis with Kraken 2. Genome Biol. 2019;20:257. <https://github.com/DerrickWood/kraken2> (PlusPF prebuilt DB: <https://benlangmead.github.io/aws-indexes/k2>)
+- **Sylph** -- Shaw J, Yu YW. Rapid species-level metagenome profiling and containment estimation with sylph. Nat Biotechnol. 2025;43:1348-1359. <https://github.com/bluenote-1577/sylph>
+- **FCS-GX** -- Astashyn A, et al. Rapid and sensitive detection of genome contamination at scale with FCS-GX. Genome Biol. 2024;25:60. <https://github.com/ncbi/fcs>
+- **BLAST+** -- Camacho C, et al. BLAST+: architecture and applications. BMC Bioinformatics. 2009;10:421. <https://blast.ncbi.nlm.nih.gov>
 TOOLSEOF
     """
 }
