@@ -30,3 +30,6 @@ refs/
 *_test/
 tests/**/*.fastq.gz
 databases/
+
+# ---- Python bytecode ----
+__pycache__/

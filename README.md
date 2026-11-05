@@ -11,526 +11,700 @@
   <img src=".logo/canopy.png" alt="Canopy logo">
 </p>
 
-`Canopy` is a [nextflow](https://www.nextflow.io/) pipeline for plant genome assembly.
-This pipeline is currently under development. At the moment this is ONT-only de novo
-assembly developed for sorghum genomes with explicit organelle separation. The name
-**Canopy** refers to the upper layer of a plant — the whole crown that emerges once every
-branch and leaf is assembled together, much like how this pipeline assembles a complete
-genome from thousands of individual long reads.
+`Canopy` is a [Nextflow](https://www.nextflow.io/) pipeline for plant genome assembly from Oxford
+Nanopore (ONT) long reads. It assembles the chloroplast, mitochondrial and nuclear genomes separately,
+then screens the nuclear genome for contamination so it is ready for an NCBI submission check. It was
+developed on sorghum and is still under active development. The name **Canopy** refers to the upper
+layer of a plant: the whole crown that emerges once every branch and leaf is assembled together, much
+like a complete genome emerging from thousands of individual long reads.
+
+## Contents
+
+- [Contact](#contact)
+- [What Canopy does](#what-canopy-does)
+- [Workflow DAG](#workflow-dag)
+- [Key parameters](#key-parameters)
+- [Directory structure expected](#directory-structure-expected)
+- [Running](#running)
+- [Results](#results)
+- [How contigs are kept or removed](#how-contigs-are-kept-or-removed)
+- [Using Canopy on another species](#using-canopy-on-another-species)
+- [Sequencing chemistry](#sequencing-chemistry-input-data)
+- [Resource classes](#resource-classes-configured-in-nextflowconfig)
+- [HPC notes](#hpc-notes-glbrc--htcondor)
+- [Containers](#containers)
+- [Known limitations](#known-limitations)
+- [Clean up](#clean-up)
+- [References](#references)
 
 ## Contact
 
 Gian M. N. Benucci, Ph.D. — [benucci@msu.edu](mailto:benucci@msu.edu) — Michigan State University
 
-## What Canopy does (for now)
+## What Canopy does
 
-For each sample:
+For each sample, with the settings the launcher scripts use:
 
-1. **QC** — NanoPlot read-level QC
-2. **Filter** — filtlong (min length 1 kb, min mean quality 80)
-3. **Map to organelles** — minimap2 against combined cp + mt reference
-4. **Partition reads** — split into chloroplast / mitochondrial / nuclear sets
-5. **Assemble organelles** — Flye per compartment (default), or Oatk HMM-based read
-   detection on all filtered reads (`--organelle_assembler oatk`)
-6. **Filter organelle contigs** — reference-based filter removes nuclear-inserted
-   organelle sequence (NUPTs/NUMTs)
-7. **Polish organelles** — Medaka polishes the filtered chloroplast/mitochondria assemblies
-   (previously only the nuclear assembly was polished, so organelle QC reflected raw ONT
-   basecalling error rather than assembly quality)
-8. **Assemble nuclear genome** — Flye
-9. **Polish nuclear** — Medaka
-10. **Purge duplicates** — purge_dups always runs; both the purged and unpurged
-    (Medaka) genomes are carried forward for comparison
-11. **Phase (optional)** — HapDup for diploid output (`--run_hapdup`, off by default)
-12. **Scaffold (optional)** — RagTag correct + scaffold against `--nuclear_ref`, run on
-    both candidate genomes
-13. **Compare & select final** — QUAST + BUSCO score both candidates side-by-side (this
-    exposes purge_dups over-purging); `--final_assembly medaka|purge` (default `medaka`)
-    picks which one is published as the final genome
-14. **Contaminant screening (optional)** — Kraken2 classification + BlobTools
-    coverage/taxonomy blob plots on the final genome (`--run_kraken2`, `--run_blobtools`,
-    `--run_qualimap`)
-15. **Contaminant flagging (optional)** — `--flag_contaminants` flags a contig as
-    contaminant only when **all three** hold: non-target phylum by BlobTools, unplaced by
-    RagTag, and under 10% aligned to the nuclear reference — then moves those contigs out of the
-    nuclear genome into a separate FASTA. The resulting `decontam` genome is the published nuclear
-    genome, QC'd with QUAST/BUSCO alongside the other candidates. Unplaced, unaligned contigs
-    with no taxonomy call stay in the genome and are listed for review (`decision` column of
-    the audit table). Requires `--run_kraken2` + `--nuclear_ref`.
-16. **Sylph corroboration (optional)** — `--verify_sylph` independently checks the removed
-    and review contigs against GTDB using containment ANI. It is advisory and does not
-    change which contigs are removed; it requires `--flag_contaminants` and records a
-    per-contig corroboration table in the published QC output and results archive.
-17. **Reports** — MultiQC aggregation, a human-readable per-sample assembly summary
-    (`FINAL_SUMMARY`, requires `--nuclear_ref`), a tool-citations report, and
-    `PACKAGE_RESULTS` — zips the genome files, summary, QUAST/BUSCO reports, and (when
-    enabled) the blob plot, contamination audit, review list, and Sylph and BLAST tables into
-    one small archive
+**Read preparation**
+
+1. **Read QC:** NanoPlot on the raw reads.
+2. **Read filtering:** Filtlong keeps reads of at least 1 kb with a mean quality of at least 80
+   (Filtlong's own 0–100 score, not Phred).
+3. **Organelle mapping:** minimap2 (`map-ont`) against the combined chloroplast and mitochondrial
+   references.
+4. **Read partitioning:** samtools splits reads into chloroplast and mitochondrial sets (primary
+   alignments) and a nuclear set (unmapped reads). seqkit removes duplicate read names from the
+   organelle sets, and per-compartment read and coverage statistics are recorded.
+
+**Organelle assembly**
+
+5. **Assembly:** Flye per compartment (the default, with a 150 kb chloroplast and 500 kb mitochondrial
+   size estimate), or Oatk with `--organelle_assembler oatk`. Oatk uses all filtered reads and the
+   pre-built embryophyta OatkDB, and Bandage draws its assembly graphs.
+6. **Reference filter:** minimap2 (`asm10`) keeps contigs with matched bases over more than 50% of
+   their length at more than 70% identity. This removes nuclear copies of organelle sequence
+   (NUPTs and NUMTs). Turn it off with `--filter_organelles false`.
+7. **Polishing and QC:** Medaka with the deduplicated organelle reads, then QUAST against the organelle
+   reference.
+
+**Nuclear assembly**
+
+8. **Assembly:** Flye on the nuclear reads, using `--genome_size`.
+9. **Polishing:** Medaka.
+10. **Purge duplicates:** purge_dups always runs, with cutoffs tuned from the coverage peak unless you
+    set `--calcuts_args`. The purged genome and the unpurged Medaka genome both continue as candidates.
+11. **Phasing (optional):** HapDup with `--run_hapdup`, starting from the purged genome.
+12. **Scaffolding (with `--nuclear_ref`):** RagTag `correct` and `scaffold` on both candidates. RagTag
+    joins neighbouring contigs with 100 bp gaps.
+13. **Selecting the final candidate:** `--final_assembly medaka|purge` (default `medaka`) chooses which
+    candidate continues through screening. QUAST and BUSCO score all candidates side by side, which
+    exposes over-purging.
+
+**Contaminant evidence (optional, on the selected candidate)**
+
+14. **Read mapping:** minimap2 maps the nuclear reads back to the genome. Qualimap (`--run_qualimap`)
+    reports alignment QC, and a primary-alignment BAM feeds BlobTools.
+15. **Taxonomy:** Kraken2 against PlusPFP with `--run_kraken2`. BlobTools draws the coverage, GC and
+    taxonomy blob plots.
+16. **First contaminant call:** with `--flag_contaminants`, contigs are checked for taxonomy, RagTag
+    placement and alignment to the nuclear reference.
+17. **Independent checks:** Sylph against GTDB (`--verify_sylph`) and BLASTn against a local database
+    (`--verify_blast`) on the contigs flagged for removal or review.
+18. **NCBI screening:** with `--fcs_screen`, FCS-GX and FCS-adaptor on the full genome, plus minimap2
+    (`asm20`) of unplaced contigs against fungal references.
+
+**Final genomes and reports**
+
+19. **Decision rule:** `bin/canopy_contig_rule.py` combines the evidence for every contig, as described
+    in [How contigs are kept or removed](#how-contigs-are-kept-or-removed).
+20. **Final genomes:** `bin/canopy_write_genomes.py` writes `<sample>_final.fasta` and
+    `<sample>_full_flagged.fasta` with their AGPs, trimming adaptor hits from contig ends.
+21. **Re-screening:** FCS-GX and FCS-adaptor run again on the final genome. A genome with hits gets one
+    more round (`final2`). Hits left after that give `screen_status=CHECK`.
+22. **Reports:** MultiQC, a per-sample assembly summary, a tools report, and one zip archive per sample
+    that holds the genomes and their evidence.
 
 ## Workflow DAG
 
-The workflow below shows the process structure. Stages marked `*` are optional or mode-dependent.
+<p align="center">
+  <img src="docs/images/canopy_metro.svg" alt="Metro map of the Canopy workflow, from reads through organelle and nuclear assembly to contaminant screening and final genomes">
+</p>
 
-```mermaid
-graph TD
-    RAW["reads/<sample>/*.fastq.gz"] --> 01["01 NANOPLOT"]
-    RAW --> 01b["01b FETCH_OATKDB *"]
-    RAW --> 02["02 FILTER_READS"]
-    02 --> 03["03 ALIGN_TO_ORGANELLES"]
-    03 --> 04["04 SORT_INDEX_BAM"]
-    04 --> 05["05 EXTRACT_RAW_READSETS"]
+Each line follows one kind of data through the stations that process it, and dashed lines are optional.
+The map simplifies some details:
 
-    05 --> 06["06 DEDUP_ORGANELLE_READS"]
-    06 --> 07["07 READSET_STATS *"]
-    06 --> 08["08 ASSEMBLE_CP_FLYE *"]
-    06 --> 09["09 ASSEMBLE_MT_FLYE *"]
-    05 --> 05b["05b ASSEMBLE_ORGANELLES_OATK *"]
-    05b --> 01b
-    05b --> BANDAGE["BANDAGE_IMAGE"]
-    08 --> BANDAGE
-    09 --> BANDAGE
-    BANDAGE --> 11["11 SELECT_OR_MERGE_ORGANELLE_ASM"]
-    11 --> 12["12 FILTER_ORGANELLE_CONTIGS *"]
-    12 --> 13["13 POLISH_MEDAKA_ORGANELLE"]
-    13 --> 14["14 QUAST_ORGANELLE"]
-    13 --> 14b["14b MERQURY_QV *"]
+- Oatk takes all filtered reads, but the mapping, partitioning and seqkit stations still run in Oatk
+  mode because Medaka polishes the organelles with those reads.
+- QUAST and BUSCO in section 5 score every nuclear candidate, not only the final genome.
+- RagTag and the sections after it depend on `--nuclear_ref`. Without a reference, the candidates are
+  the unscaffolded genomes, and the summary and archive are not produced.
+- Contaminant evidence also includes alignment of unplaced contigs to the nuclear reference, as part
+  of the Kraken rule station.
 
-    05 --> NUC_FASTQ["05 nuclear FASTQ"]
-    NUC_FASTQ --> 15["15 ASSEMBLE_NUCLEAR"]
-    15 --> 16["16 POLISH_MEDAKA"]
-    16 --> 16b["16b MERQURY_QV *"]
-    16 --> 17["17 PURGE_DUPS"]
-    16 --> 18["18 MEDAKA_CANDIDATE"]
-    16 --> 19["19 HAPDUP *"]
-    19 --> 19b["19b HAPDUP_DELIVERABLE"]
+For the full process-level graph of a run, open `dag.html` in its output directory.
 
-    17 --> 20["20 RAGTAG_SCAFFOLD *"]
-    18 --> 20
-    20 --> 20b["20b TIDK_TELOMERE_ID *"]
-    17 --> 21["21 SELECT_FINAL_ASSEMBLY"]
-    18 --> 21
-    21 --> 22["22 ALIGN_FOR_QC *"]
-    22 --> 23["23 QUALIMAP_BAMQC *"]
-    22 --> 24["24 FILTER_PRIMARY_BAM *"]
-    24 --> 25["25 BLOBTOOLS_COVERAGE *"]
-    24 --> 26["26 KRAKEN2_CLASSIFY *"]
-    26 --> 27["27 BLOBTOOLS_TAXONOMY *"]
-    27 --> 28["28 CONTAMINANT_FLAGGING *"]
-    20 --> 28
-    28 --> 29["29 REMOVE_CONTAMINANTS *"]
-    29 --> 30["30 EXTRACT_CANDIDATE_CONTIGS *"]
-    30 --> 31["31 SYLPH_VERIFY_CONTAMINANTS *"]
-    30 --> 32["32 BLAST_VERIFY_CONTAMINANTS *"]
+The map is drawn with [nf-metro](https://github.com/seqeralabs/nf-metro) from
+[`docs/images/canopy_metro.mmd`](docs/images/canopy_metro.mmd). After changing the workflow, update that
+file and render it again:
 
-    15 & 16 & 17 & 18 & 20 & 28 & 29 --> 33["33 QUAST_NUCLEAR"]
-    15 & 16 & 17 & 18 & 20 & 28 & 29 --> 34["34 BUSCO_NUCLEAR"]
-    01 & 07 & 14 & 20b & 22 & 33 & 34 --> 35["35 MULTIQC"]
-    01 & 07 & 14 & 20b & 22 & 33 & 34 --> 36["36 FINAL_SUMMARY *"]
-    01 & 07 & 14 & 20b & 22 & 33 & 34 --> 37["37 TOOLS_REPORT"]
-    19b & 36 & 37 --> 38["38 PACKAGE_RESULTS *"]
+```bash
+pip install nf-metro   # needs Python 3.10 or later; the map was drawn with version 2.1.0
+nf-metro render docs/images/canopy_metro.mmd --embed-font -o docs/images/canopy_metro.svg
 ```
 
-For the full process-level DAG from a run, use `nextflow run main.nf -preview` or open the
-`dag.html` generated in the run's output directory.
+## Key parameters
+
+### Inputs and general
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `--reads` | `${projectDir}/reads` | One sample directory, or a parent directory of sample directories, holding `*.fastq.gz` |
+| `--cp_ref` | required | Chloroplast reference FASTA |
+| `--mt_ref` | required | Mitochondrial reference FASTA |
+| `--nuclear_ref` | none | Nuclear reference FASTA. Enables RagTag, QUAST genome fraction, the summary and the archive |
+| `--outdir` | `results` | Output directory |
+| `--help` | `false` | Print the usage message and exit |
+
+### Assembly and polishing
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `--organelle_assembler` | `flye` | `flye` per compartment, or `oatk` for HMM-based read detection |
+| `--filter_organelles` | `true` | Reference filter on organelle contigs |
+| `--genome_size` | `780m` | Estimated nuclear genome size for Flye |
+| `--medaka_model` | `r1041_e82_400bps_sup_v5.2.0` | Must match your chemistry and basecaller |
+| `--calcuts_args` | `""` | Manual purge_dups cutoffs such as `"-l 5 -m 22 -u 120"`. Empty tunes them from the coverage peak |
+| `--final_assembly` | `medaka` | `medaka` (unpurged) or `purge`. Both are always compared |
+| `--ragtag_correct` | `true` | Run `ragtag.py correct` before scaffolding |
+| `--run_hapdup` | `false` | Diploid phasing with HapDup |
+| `--busco_lineage` | `poales_odb10` | BUSCO lineage dataset |
+
+### QC and contaminant screening
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `--run_qualimap` | `false` | BAM-level QC on the selected candidate |
+| `--run_blobtools` | `false` | Coverage and GC blob plot, without taxonomy |
+| `--run_kraken2` | `false` | Kraken2 classification and taxonomy blob plots |
+| `--kraken2_db` | PlusPFP path on GLBRC | Kraken2 database, about 231.5 GB when loaded. Downloaded if this path or `--taxdump_dir` is missing |
+| `--taxdump_dir` | PlusPFP path on GLBRC | NCBI taxdump (`nodes.dmp`, `names.dmp`) for BlobTools |
+| `--kraken2_confidence` | `0.1` | Kraken2 `--confidence`, which reduces spurious calls on long contigs |
+| `--flag_contaminants` | `false` | Contaminant rule. Needs `--run_kraken2` and `--nuclear_ref` |
+| `--contam_target_phylum` | `Streptophyta` | Phylum treated as on-target |
+| `--contam_max_ref_aligned` | `0.10` | A contig aligned to the nuclear reference at or above this fraction is not removed by the alignment-dependent rules |
+| `--verify_sylph` | `false` | Sylph check of flagged contigs against GTDB. Needs `--flag_contaminants` |
+| `--sylph_db` | `databases/sylph/gtdb-r226-c200-dbv1.syldb` | Downloaded if absent |
+| `--sylph_min_ani` | `90` | Minimum adjusted ANI |
+| `--verify_blast` | `false` | BLASTn of flagged contigs. Needs `--flag_contaminants` |
+| `--blast_db` | `databases/blast/core_nt/core_nt` | Prefix of a local database. Not downloaded, and the run stops if it is missing |
+| `--blast_min_identity` | `90` | Minimum percent identity for a hit to corroborate |
+| `--blast_min_qcov` | `50` | Minimum query coverage percent, across all alignments to the subject |
+| `--blast_max_targets` | `10` | `-max_target_seqs` for BLASTn |
+
+### NCBI screening
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `--fcs_screen` | `false` | FCS-GX, FCS-adaptor, the decision rule and the final genomes. Needs `--flag_contaminants` and `--verify_blast` |
+| `--fcs_gx_db` | `databases/fcs-gx/gxdb` | FCS-GX database, about 465 GB. Not downloaded |
+| `--fcs_gx_taxid` | `4558` | NCBI taxid of your organism (*Sorghum bicolor* by default) |
+| `--fcs_adaptor_image` | `ncbi/fcs-adaptor:0.5.5` | FCS-adaptor container image |
+| `--fungal_refs` | `databases/fungal_refs/fungi.fasta` | Fungal reference FASTA, with IDs prefixed `<species>\|`. Not downloaded |
+| `--contam_min_fungal_frac` | `0.5` | Minimum fraction of a contig aligned to a fungal reference |
+
+> `--skip_purge` and `--blast_remote` are retired, and setting either stops the run. BLASTn only searches
+> a local database, so assembly sequence is never sent to a remote service.
 
 ## Directory structure expected
 
-```
+You provide `reads/`, `refs/` and `databases/`. The other files come with the repository.
+
+```text
 Canopy/
-├── main.nf
-├── nextflow.config
+├── main.nf                     # top-level workflow
+├── nextflow.config             # parameters, resource labels and profiles
 ├── modules/
-│   ├── qc.nf              # NanoPlot, filtering, QUAST, BUSCO, Qualimap, MultiQC
-│   ├── mapping.nf          # organelle alignment, read partitioning
-│   ├── dbs.nf              # OatkDB / Kraken2 PlusPFP fetch
-│   ├── assembly.nf         # Flye / Oatk organelle + nuclear assembly
-│   ├── polishing.nf        # Medaka (nuclear + organelle), purge_dups, HapDup
-│   ├── scaffolding.nf      # RagTag correct + scaffold
-│   ├── contamination.nf    # Kraken2 + BlobTools screening, contaminant flagging/removal
-│   └── reports.nf          # FINAL_SUMMARY, TOOLS_REPORT, PACKAGE_RESULTS
-├── helper-functions/
-│   └── quay_tools.sh       # quay.io biocontainer image lookup/verification helpers
-├── refs/                        <-- you provide
-│   └── sorghum/*.fasta
-└── reads/                       <-- you provide
-    ├── sample_A/
-    │   └── *.fastq.gz
-    ├── sample_B/
-    │   └── *.fastq.gz
-    └── ...
+│   ├── qc.nf                   # NanoPlot, Filtlong, QUAST, BUSCO, Qualimap, MultiQC, organelle filter
+│   ├── mapping.nf              # organelle mapping and read partitioning
+│   ├── dbs.nf                  # OatkDB, Kraken2 PlusPFP and Sylph database downloads
+│   ├── assembly.nf             # Flye and Oatk
+│   ├── polishing.nf            # Medaka, purge_dups, HapDup
+│   ├── scaffolding.nf          # RagTag
+│   ├── contamination.nf        # Kraken2, BlobTools, Sylph, BLASTn, FCS, decision rule, final genomes
+│   └── reports.nf              # summary, tools report, per-sample archive
+├── bin/
+│   ├── canopy_contig_rule.py   # contaminant decision rule
+│   ├── canopy_write_genomes.py # final and flagged genomes, adaptor trimming
+│   ├── canopy_merge_trims.py   # merges trim logs across screening rounds
+│   ├── canopy_build_release.py # builds a multi-sample release from the archives
+│   ├── canopy_report_html.py   # converts the assembly summary to HTML
+│   └── condor_submit           # routes task submissions to the scheduler
+├── utils/
+│   └── quay_tools.sh           # finds and verifies container images
+├── docs/images/                # workflow metro map and its source
+├── pipeline.condor             # submits one Nextflow head job per sample
+├── run_pipeline_condor.sh      # script that each head job runs
+├── run_pipeline.sh             # runs the head processes in the background, without Condor jobs
+├── run_pipeline.submit         # older submit file; pipeline.condor is preferred
+├── watch_pipeline.sh           # follows a Nextflow log
+├── reads/                      # you provide
+│   ├── sample_A/
+│   │   └── *.fastq.gz
+│   └── sample_B/
+│       └── *.fastq.gz
+├── refs/                       # you provide
+│   └── sorghum/
+│       ├── sorghum_cp_NC008602.fasta
+│       ├── sorghum_mt_NC008360.fasta
+│       └── Sbicolor_730_v5.0.fa
+└── databases/                  # you provide what --verify_blast and --fcs_screen need
+    ├── blast/core_nt/
+    ├── fcs-gx/gxdb/
+    ├── fungal_refs/fungi.fasta
+    └── sylph/
 ```
+
+The directory name under `reads/` becomes the sample name, and all FASTQ files in it are treated as one
+sample.
 
 ## Running
 
-### Local test (validate the wiring, no compute)
+### Create the Nextflow conda environment
 
-To check the pipeline wires up correctly (channels, params, DAG) without running any process
-or needing real coverage, use `-preview` (see Sanity checks below). For an actual assembly run
-use the full reads from one real biological sample.
+Canopy needs Nextflow, Java and Apptainer. All other tools run in containers, so you install only this
+one environment:
+
+```bash
+conda create -n nextflow -c conda-forge -c bioconda \
+    nextflow=26.04.1 apptainer=1.4.5 openjdk=21
+conda activate nextflow
+
+nextflow -version
+apptainer --version
+```
+
+These are the versions the current results were produced with. `nextflow.config` allows Nextflow 24.04.0
+or later, but older versions have not been tested with this code.
+
+The launcher scripts expect the environment at `~/.conda/envs/nextflow`. They do not need it activated.
+
+### Check the setup
+
+```bash
+# Check that the configuration parses
+nextflow config -profile condor
+
+# Check the wiring without running any process
+nextflow run main.nf -preview \
+    --cp_ref refs/sorghum/sorghum_cp_NC008602.fasta \
+    --mt_ref refs/sorghum/sorghum_mt_NC008360.fasta
+```
+
+### One run with your own options
+
+On HTCondor:
 
 ```bash
 nextflow run main.nf \
-    --reads /path/to/reads \
-    --cp_ref /path/to/sorghum_chloroplast.fasta \
-    --mt_ref /path/to/sorghum_mitochondrion.fasta \
-    --outdir results_local
+    -profile condor \
+    --reads reads/sample_A/ \
+    --cp_ref refs/sorghum/sorghum_cp_NC008602.fasta \
+    --mt_ref refs/sorghum/sorghum_mt_NC008360.fasta \
+    --nuclear_ref refs/sorghum/Sbicolor_730_v5.0.fa \
+    --outdir results_sample_A \
+    -w nf-work-sample_A \
+    -resume
 ```
 
-### HTCondor (production)
+Without `-profile condor`, tasks run on the local machine. The resource classes still apply, so that needs
+a machine with at least 448 GB of RAM for the nuclear assembly, and 700 GB for FCS-GX.
 
-`-profile condor` submits pipeline processes to HTCondor. Run the Nextflow head processes from
-the submit node (`scarcity-ap-1`). The launchers start all five samples concurrently, with
-separate output, work, and log directories for each sample.
+To run the full screening, add:
 
-The five samples currently in `reads/` are:
-
-```text
-B11077  BTx2932  F07020  F10702  F25101
+```bash
+    --run_qualimap true \
+    --run_blobtools true \
+    --run_kraken2 true \
+    --flag_contaminants true \
+    --verify_sylph true \
+    --verify_blast true \
+    --fcs_screen true
 ```
 
-#### Run all samples
+### All samples on HTCondor
 
-Recommended: submit the head process to Condor.
+Run this from the submit node, `scarcity-ap-1`. It submits one independent Nextflow head job per sample:
 
 ```bash
 condor_submit pipeline.condor
 condor_q
 ```
 
-This submits five independent jobs using `run_pipeline_condor.sh`. To run the five head
-processes directly in the background instead:
+Alternatively, `bash run_pipeline.sh` starts the same head processes in the background with `nohup`.
+
+Both use the same settings: Flye for organelles, every screening step including `--fcs_screen`, and no
+HapDup. Each sample gets:
+
+| Path | Contents |
+|---|---|
+| `results_<sample>${OUTDIR_SUFFIX}/` | Published results |
+| `nf-work-<sample>/` | Nextflow task directories and cache |
+| `.canopy-run-<sample>/` | Launch directory with `.nextflow/` and `.nextflow.log` |
+| `condor_logs/` | Head-job logs |
+
+Environment variables change a whole batch:
 
 ```bash
-bash run_pipeline.sh
-```
+# Keep a run apart from earlier results; tasks cached in nf-work-<sample>/ are still reused
+OUTDIR_SUFFIX=_v5 condor_submit pipeline.condor
 
-Both commands run all samples concurrently and create `results_<sample>/`,
-`nf-work-<sample>/`, and sample-specific logs under `condor_logs/`. Set
-`FINAL_ASSEMBLY=purge` before either command to publish the
-purged nuclear assembly instead of the default Medaka assembly:
-
-```bash
+# Continue with the purged genome instead of the Medaka genome
 FINAL_ASSEMBLY=purge condor_submit pipeline.condor
 ```
 
-The launchers use the same settings for every sample, including Flye for organelles, and
-enable the complete workflow except HapDup phasing: Qualimap, BlobTools, Kraken2, contaminant
-flagging/removal, Sylph corroboration, and BLAST corroboration. HapDup remains disabled because
-neither launcher includes `--run_hapdup true`.
+The launchers contain paths and sample names specific to our setup. Before using them elsewhere, update:
 
-Set `OUTDIR_SUFFIX` to keep a run separate from earlier results, for example
-`OUTDIR_SUFFIX=_v3 condor_submit pipeline.condor` writes to `results_<sample>_v3/` and names the
-Condor logs to match. Cached tasks in `nf-work-<sample>/` are still reused.
+- `HOME`, `PROJECT_DIR` and the reference paths in `run_pipeline_condor.sh` and `run_pipeline.sh`
+- `initialdir` and the `queue sample in ...` line in `pipeline.condor`
+- the `case` list of allowed samples in `run_pipeline_condor.sh`
+- the `SAMPLES` line in `run_pipeline.sh`
 
-#### Results
+To run a subset, edit the sample lists the same way.
 
-Each sample's archive, `results_<sample>/reports/<sample>/<sample>_assembly.zip`, holds four
-genome files:
-
-| File | Contents |
-|---|---|
-| `<sample>_nuclear.fasta` | Nuclear genome to use, without removed contigs. Published uncompressed as `assembly/decontam/<sample>/<sample>_decontam.fasta` |
-| `<sample>_chloroplast.fasta` | Chloroplast assembly |
-| `<sample>_mitochondria.fasta` | Mitochondrial assembly |
-| `<sample>_removed_contigs.fasta` | Whole contigs removed from the nuclear genome, for checking. Empty if none were removed |
-
-`<sample>_contamination_audit.tsv` gives the decision and evidence for each contig, and
-`<sample>_review_contigs.txt` lists contigs that stay in the nuclear genome until checked. The
-run fails if the nuclear and removed FASTAs do not add up to the scaffolded genome.
-
-#### Run one hardcoded sample
-
-Edit the `queue sample in ...` line of `pipeline.condor`, or the `SAMPLES` line of
-`run_pipeline.sh`. For example, to run only F10702:
+### Follow and stop a run
 
 ```bash
-SAMPLES=(F10702)
+./watch_pipeline.sh .canopy-run-F10702/.nextflow.log
+condor_rm <cluster_id>     # stops head jobs submitted with pipeline.condor
 ```
 
-Then launch it with the matching command:
+### Resume after a failure
 
-```bash
-condor_submit pipeline.condor
-# or
-bash run_pipeline.sh
-```
+The launchers already use `-resume`, so submit them again. Nextflow reuses cached tasks and reruns only what
+changed or failed. With your own commands, always add `-resume` and keep the same `-w` directory.
 
-To choose another sample, replace `F10702` with the directory name under `reads/`. The sample
-name must match a directory containing one or more `*.fastq.gz` files.
-
-To watch the Nextflow log:
-
-```bash
-./watch_pipeline.sh
-```
-
-Stop a Condor head job with `condor_rm <cluster_id>`. Use `-resume` in the launchers to continue
-completed work after an interruption; remove old `results_<sample>/` and `nf-work-<sample>/`
-directories first when a genuinely fresh run is required.
-
-For a one-off run against different data, the plain inline command works too:
-
-```bash
-nextflow run main.nf \
-    -profile condor \
-    --reads /path/to/reads \
-    --cp_ref /path/to/sorghum_chloroplast.fasta \
-    --mt_ref /path/to/sorghum_mitochondrion.fasta \
-    --outdir results \
-    -w /scratch/$USER/nf-work-canopy \
-    -resume
-```
+Editing `bin/canopy_contig_rule.py` or `bin/canopy_write_genomes.py` invalidates every later task, because
+they are task inputs. That includes QUAST, which takes about 2 hours per genome.
 
 ### Enable HapDup phasing
 
-Add `--run_hapdup` to either command above.
+Add `--run_hapdup true` to your command. The launchers do not set it.
+
+### Build a multi-sample release
+
+Build releases from the per-sample archives, not from `assembly/final/`, which an aborted run can leave
+truncated. The script checks each genome against its stats and writes checksums.
+
+```bash
+python3 bin/canopy_build_release.py \
+    --release results_release \
+    --results-pattern 'results_{sample}_v5' \
+    --samples sample_A sample_B \
+    --readme path/to/release_README.md
+```
+
+`--readme` is the file to install as the release's `README.md`, and `--extra-evidence` optionally adds a
+directory of per-contig evidence tables. Check a release with `sha256sum -c MANIFEST.sha256` from inside
+it.
+
+## Results
+
+Every archive at `results_<sample>/reports/<sample>/<sample>_assembly.zip` holds what you need to review
+one genome, in a small download. With `--fcs_screen`:
+
+| File | Contents |
+|---|---|
+| `<sample>_final.fasta`, `.agp` | Nuclear genome to use, with contaminants removed and adaptors trimmed |
+| `<sample>_full_flagged.fasta`, `.agp` | Every sequence, with its decision and evidence in the headers |
+| `<sample>_chloroplast.fasta` | Chloroplast assembly |
+| `<sample>_mitochondria.fasta` | Mitochondrial assembly |
+| `<sample>_assembly_summary.md` | Assembly report |
+| `<sample>_contig_decisions.tsv` | Decision, rule and evidence for each contig |
+| `<sample>_adapter_trims.tsv` | Adaptor trims applied |
+| `<sample>_blast_corroboration.tsv`, `<sample>_sylph_corroboration.tsv` | Independent check results |
+| `screening/` | FCS-GX and FCS-adaptor reports for the full and final genomes, and `<sample>_ncbi_screen.txt` |
+| `blobtools/` | Blob plots, table and coverage |
+| `quast_*_report.html`, `busco_nuclear_final_summary.txt` | Assembly QC |
+| `pipeline_tools.md` | Tools report |
+
+Without `--fcs_screen`, the nuclear genome is `<sample>_nuclear.fasta`, with removed contigs in
+`<sample>_removed_contigs.fasta`, and the decisions are in `<sample>_contamination_audit.tsv`.
+
+The results directory also holds:
+
+| Path | Contents |
+|---|---|
+| `assembly/` | Organelle, nuclear, scaffold and final assemblies |
+| `polishing/` | Medaka, purge_dups and HapDup output |
+| `qc/` | NanoPlot, read-set statistics, QUAST, BUSCO, Qualimap, Kraken2, BlobTools, contamination evidence |
+| `reads_filtered/`, `reads_partitioned/` | Filtered and partitioned reads |
+| `mapping/` | Organelle mapping statistics |
+| `multiqc/` | MultiQC report |
+| `pipeline_report.html`, `timeline.html`, `trace.txt`, `dag.html` | Nextflow execution records |
+
+As a guide, our five sorghum genomes used about 35–130 GB of published results and 135–265 GB of work
+directory per sample.
+
+## How contigs are kept or removed
+
+Canopy never removes a contig placed on a chromosome by RagTag. Only unplaced contigs can be removed.
+
+With `--flag_contaminants` alone, the published genome comes from the **Kraken rule**. It removes a contig
+when all three of these hold:
+
+- BlobTools and Kraken2 assign it a phylum other than `--contam_target_phylum`.
+- RagTag left it unplaced.
+- Less than `--contam_max_ref_aligned` of it aligns to the nuclear reference.
+
+Unplaced, unaligned contigs with no taxonomy call stay in the genome and are listed for review. In this
+mode Sylph and BLASTn are advisory.
+
+With `--fcs_screen`, the published genome comes from the **decision rule**. It removes an unplaced contig
+when any of these holds, checked in this order:
+
+| Rule | Condition |
+|---|---|
+| `R1_fcs_exclude` | FCS-GX action is `EXCLUDE` |
+| `R2_fcs_review` | FCS-GX action is `REVIEW`, and the Kraken rule, fungal alignment or BLASTn agrees |
+| `R3_kraken_blast` | The Kraken rule says remove, and BLASTn corroborates |
+| `R4_fungal_alignment` | At least `--contam_min_fungal_frac` aligns to a fungal reference, and less than `--contam_max_ref_aligned` aligns to the nuclear reference |
+| `R5_blast` | BLASTn corroborates, and less than `--contam_max_ref_aligned` aligns to the nuclear reference |
+
+**BLASTn is not advisory in this mode**, because R2, R3 and R5 use it. Sylph stays advisory. GC and coverage
+are recorded for interpretation but never trigger removal, because they overlapped between plant and
+contaminant contigs in the sorghum genomes.
+
+A contig stays in the genome for review if it has an unresolved FCS-GX call or Kraken flag. A placed contig
+with an FCS-GX call also stays, and the count is reported.
+
+FCS-adaptor hits are trimmed from contig ends in both genome versions, and the AGP is rebuilt so scaffold
+gaps stay 100 bp. A hit more than 1 kb from a contig end stops the run, because it could mark a chimeric
+join that trimming would not fix. `+` in sequence names becomes `plus`, because NCBI and FCS do not accept
+it.
+
+`screen_status=PASS` in the report means the last FCS-GX and FCS-adaptor screens of the final genome have no
+hits. It is not a complete NCBI submission check: see [Known limitations](#known-limitations).
+
+## Using Canopy on another species
+
+Canopy has only been tested on sorghum. For another plant, check at least these:
+
+| Setting | Why |
+|---|---|
+| `--cp_ref`, `--mt_ref`, `--nuclear_ref` | References for your species |
+| `--genome_size` | Nuclear size estimate for Flye |
+| `--busco_lineage` | Lineage that matches your species |
+| `--fcs_gx_taxid` | FCS-GX uses this to decide what counts as foreign |
+| `--contam_target_phylum` | Keep `Streptophyta` for land plants, and change it for other groups |
+| `--fungal_refs` | The defaults are the two fungi found in these samples: *Rhizopus delemar* (GCF_000149305.1) and *Aspergillus niger* (GCF_000002855.4) |
+| `--medaka_model` | Must match your chemistry and basecaller |
+| Flye organelle sizes | The 150 kb and 500 kb estimates are set in `modules/assembly.nf` |
+| `notification.to` in `nextflow.config` | Address that receives run completion emails |
 
 ## Sequencing chemistry (input data)
 
-All reads processed by this pipeline so far are ONT **V14 chemistry**, sequenced on a
-**FLO-PRO114M (R10.4.1)** flow cell. Basecalling was **simplex only** — MinKNOW's
-on-instrument software does not offer live duplex basecalling — using the
-**Super-accurate basecalling (SUP), 400bps** model. This is why `--medaka_model` defaults
-to an `r1041_e82_400bps_sup_*` model (see [Key parameters](#key-parameters) below); if you
-sequence with different chemistry, a different flow cell, or a different basecaller
-speed/accuracy setting, pick the matching Medaka model instead.
-
-## Key parameters
-
-| Parameter               | Default                                | Notes                                                          |
-|------------------------|-----------------------------------------|-----------------------------------------------------------------|
-| `--reads`               | `./reads`                              | Dir containing `<sample_id>/*.fastq.gz`                        |
-| `--cp_ref`              | (required)                             | Chloroplast reference FASTA                                    |
-| `--mt_ref`              | (required)                             | Mitochondrion reference FASTA                                  |
-| `--nuclear_ref`         | none                                    | Nuclear reference FASTA; enables RagTag scaffolding, QUAST genome-fraction, and `FINAL_SUMMARY` |
-| `--organelle_assembler` | `flye`                                 | `flye` (per-compartment) or `oatk` (HMM-based read detection)  |
-| `--genome_size`         | `720m`                                 | Estimated nuclear genome size for Flye                         |
-| `--medaka_model`        | `r1041_e82_400bps_sup_v5.2.0`          | Match your basecaller + chemistry                               |
-| `--busco_lineage`       | `poales_odb10`                         | Plant lineage; downloaded auto by BUSCO                        |
-| `--run_hapdup`          | `false`                                | Enable for diploid phasing                                     |
-| `--calcuts_args`        | `""` (autotune)                        | Manual purge_dups cutoffs, e.g. `"-l 5 -m 22 -u 120"`           |
-| `--final_assembly`      | `medaka`                               | `medaka` (unpurged) or `purge` — selects the published final nuclear genome; purge_dups always runs and both are compared |
-| `--run_qualimap`        | `false`                                | BAM-level coverage QC on the final genome                      |
-| `--run_blobtools`       | `false`                                | Coverage-vs-GC blob plot on the final genome (no taxonomy)      |
-| `--run_kraken2`         | `false`                                | Taxonomic contaminant screening on the final genome (needs `--kraken2_db` / `--taxdump_dir`) |
-| `--kraken2_db`          | PlusPFP DB path                        | Kraken2 database (Standard + protozoa/fungi/plant); ~231.5 GB loaded, needs a big-RAM node |
-| `--taxdump_dir`         | PlusPFP DB path                        | NCBI taxdump (nodes.dmp/names.dmp) BlobTools uses to resolve Kraken2 taxids |
-| `--kraken2_confidence`  | `0.1`                                  | Kraken2 `--confidence`; without it, long contigs can get spuriously classified from a handful of stray k-mer hits |
-| `--flag_contaminants`   | `false`                                | Moves contaminant contigs out of the nuclear genome into a separate FASTA (needs `--run_kraken2` + `--nuclear_ref`) |
-| `--contam_target_phylum`| `Streptophyta`                         | Plant phylum for the non-target-phylum check                   |
-| `--contam_max_ref_aligned` | `0.10`                              | A contig aligning to the nuclear reference above this fraction is never flagged |
-| `--verify_sylph`        | `false`                                | Advisory ANI corroboration of removed and review contigs against GTDB; requires `--flag_contaminants` |
-| `--sylph_db`            | `${projectDir}/databases/sylph/gtdb-r226-c200-dbv1.syldb` | Sylph GTDB sketch database; downloaded automatically if the path is absent |
-| `--sylph_min_ani`       | `90`                                  | Minimum adjusted ANI passed to Sylph query                             |
-| `--verify_blast`        | `false`                               | Advisory BLASTn corroboration against a local database only; remote BLAST is not supported |
-| `--blast_db`            | `${projectDir}/databases/blast/core_nt/core_nt` | Prefix of a local BLAST nucleotide database; the database itself is not downloaded by the pipeline |
-| `--blast_min_identity`  | `90`                                  | Minimum BLASTn percent identity for corroboration                     |
-| `--blast_min_qcov`      | `50`                                  | Minimum BLASTn query coverage percentage, summed over all alignments to the best subject |
-| `--outdir`              | `results`                              | Output directory                                                |
-
-> `--skip_purge` is retired — purge_dups always runs now; use `--final_assembly medaka` (equivalent to the old skip behavior) or `--final_assembly purge`.
-
-To enable independent Sylph corroboration alongside contaminant flagging:
-
-```bash
---run_kraken2 true \
---flag_contaminants true \
---verify_sylph true
-```
-
-Sylph queries only the small set of candidate contigs, while its GTDB sketch database is
-stored under `databases/sylph/` and reused across runs. A Sylph non-match is not treated as
-proof that Kraken2/BlobTools was wrong; short contigs may simply lack enough sequence for a
-confident ANI estimate.
-
-To add BLASTn corroboration against a local database, enable:
-
-```bash
---run_kraken2 true \
---flag_contaminants true \
---verify_sylph true \
---verify_blast true
-```
-
-BLASTn is run only on contigs removed or listed for review by the contamination rule. Its
-results are advisory and are written alongside the Sylph results; neither method changes the
-removal decision. `--blast_db` is the prefix of a local formatted NCBI database and defaults
-to `databases/blast/core_nt/core_nt`. The run stops if that database is missing. Remote BLAST
-is not supported, so assembly sequence is never sent to NCBI.
+All reads processed by this pipeline so far are ONT **V14 chemistry**, sequenced on a **FLO-PRO114M
+(R10.4.1)** flow cell. Basecalling was **simplex only**, because MinKNOW's on-instrument software does not
+offer live duplex basecalling, and used the **Super-accurate basecalling (SUP), 400 bps** model. That is why
+`--medaka_model` defaults to an `r1041_e82_400bps_sup_*` model. If you sequence with different chemistry, a
+different flow cell, or a different basecaller speed or accuracy, choose the matching Medaka model.
 
 ## Resource classes (configured in nextflow.config)
 
-| Label             | CPUs | RAM     | Time   | Used by                                         |
-|-------------------|------|---------|--------|--------------------------------------------------|
-| `qc`              | 16   | 128 GB  | 12h    | NanoPlot, filtlong, MultiQC, BlobTools, contaminant flagging |
-| `qc_heavy`        | 16   | 128 GB  | 24h    | BUSCO, QUAST, Qualimap                          |
-| `map`             | 24   | 128 GB  | 12h    | minimap2 + samtools                              |
-| `assemble_small`  | 16   | 128 GB  | 6h     | Flye on cp / mt, RagTag                          |
-| `assemble_heavy`  | 32   | 448 GB  | 120h   | Flye nuclear, HapDup, Kraken2 classification     |
-| `polish`          | 24   | 256 GB  | 48h    | Medaka, purge_dups                               |
+A **label** is a named resource class. Each process in `modules/` declares one, such as `label 'polish'`, and
+the matching `withLabel: 'polish'` block in `nextflow.config` sets the CPUs, memory and time limit that
+Nextflow requests for it, plus any node requirements. To change what a group of processes gets, edit that
+block rather than each process.
 
-`KRAKEN2_CLASSIFY` runs under `assemble_heavy` (448 GB, restricted to specific big-RAM nodes)
-so the ~231.5 GB loaded PlusPFP index fits fully in RAM instead of relying on
-`--memory-mapping`.
+| Label | CPUs | RAM | Time | Node limits | Used by |
+|---|---:|---:|---:|---|---|
+| `qc_light` | 8 | 32 GB | 12 h | | NanoPlot, Filtlong, decision rule, genome writing and refinement, screen summary, tools report |
+| `qc` | 16 | 128 GB | 12 h | | MultiQC, QUAST (nuclear), Qualimap, BlobTools, read deduplication and statistics, Kraken rule, candidate extraction, contaminant removal, Sylph, FCS-adaptor, summary, archive |
+| `qc_heavy` | 16 | 128 GB | 24 h | | BUSCO, BLASTn |
+| `map` | 24 | 128 GB | 12 h | | All minimap2 and samtools alignment steps, read partitioning, organelle reference filter |
+| `assemble_small` | 16 | 128 GB | 6 h | | Flye (organelles), Oatk, RagTag, QUAST (organelles) |
+| `assemble_heavy` | 32 | 448 GB | 120 h | `scarcity-1`–`5`, `9`, `11`–`13`, `20` | Flye (nuclear), HapDup, Kraken2 |
+| `polish` | 24 | 256 GB | 48 h | Not `scarcity-9` | Medaka, purge_dups |
+| `fcs_gx` | 48 | 700 GB | 12 h | `scarcity-12` only | FCS-GX |
+| `fetch` | 2 | 8 GB | 48 h | | Database downloads |
 
-Adjust to your cluster's queue limits and node capacity.
+`BANDAGE_IMAGE` sets its own resources (1 CPU, 4 GB). Without a label, a process would get the defaults of
+8 CPUs, 32 GB and 4 h.
+
+- **Retries:** tasks that end with exit code 132, 137, 139, 143 or 247 (illegal instruction, out of memory,
+  timeout and similar) retry up to twice, with the same resources.
+- **Kraken2:** it uses `assemble_heavy` so the PlusPFP index fits in RAM. Memory mapping over CephFS never
+  finished in our tests.
+- **Other clusters:** adjust these values to your queue limits and node capacity. The node limits are specific
+  to our cluster, so remove them elsewhere.
 
 ## HPC notes (GLBRC / HTCondor)
 
-- **Run Nextflow from the submit node** — it dispatches jobs, doesn't compute. Use `tmux` or `screen` to keep it alive.
-- **`work/` directory MUST be on scratch** — assembly intermediates are 100s of GB. Use `-w /scratch/$USER/nf-work-canopy`.
-- **Apptainer install required** — install via `conda install -c conda-forge apptainer -y` in the Nextflow env.
-- **First run downloads several container images** — takes 10–20 min, cached in `~/.apptainer_cache`.
+Canopy was developed on the GLBRC `scarcity` HTCondor cluster, and so far that is the only system where it has
+been tested. On other systems, expect to change the executor profile, the node requirements in
+`nextflow.config`, the launcher paths and `bin/condor_submit`.
 
-## Sanity checks before running
+- **Submit node:** Nextflow head processes must run on `scarcity-ap-1`, because they submit the tasks and only
+  dispatch work. `pipeline.condor` uses `universe = local` for this.
+- **Scheduler routing:** `bin/condor_submit` sends task submissions to `scarcity-ap-1.glbrc.org`. Set
+  `CANOPY_CONDOR_SCHEDD` to use a different scheduler.
+- **Disk space:** the work directory is large (see [Results](#results)), so put it on storage with enough room
+  and pass it with `-w`. The default is `~/nf-work-sorghum`, so set it explicitly.
+- **Container cache:** images are stored in `~/.apptainer_cache`. The first run downloads all of them.
+- **Excluded node:** `scarcity-14` is excluded for all processes, as a known bad node.
+- **`scarcity-9`:** its older CPU makes Medaka die with an illegal instruction (exit 132), so the `polish` label
+  excludes it. It still handles `assemble_heavy` work.
+- **FCS-GX:** it holds its database of about 470 GiB in `/dev/shm`, which is limited to half of a node's RAM.
+  That is why only `scarcity-12` is allowed: `scarcity-20` has too little, and `scarcity-9` and `-11` leave no
+  margin.
+- **Interrupted runs:** `-resume` reuses cached tasks but does not overwrite published files, so an aborted run
+  can leave a truncated file in the results directory. The per-sample archive is built from task outputs, so
+  [build releases](#build-a-multi-sample-release) from it.
+
+### Keep an interactive session alive
+
+`pipeline.condor` needs none of this. If you run Nextflow directly, use `tmux`:
 
 ```bash
-# Verify config parses
-nextflow config -profile condor
-
-# Show the DAG without running anything
-nextflow run main.nf -preview --cp_ref ... --mt_ref ...
-
+tmux new -s canopy
+cd /path/to/Canopy
+nextflow run main.nf -profile condor ...
 ```
 
-Use the launcher instructions above for a real run. They ensure that each sample gets its own
-output and work directory.
+Press `Ctrl-B`, then `D` to detach and leave it running. To scroll through the output, press `Ctrl-B`, then `[`,
+and `q` to leave scroll mode. To reconnect and to close the session later:
 
-## For containers
+```bash
+ssh scarcity-ap-1.glbrc.org
+tmux attach -t canopy
 
-### 1) search the hash and then use the link to find the quay image
-
-For example for both samtools and minimap
-
+tmux kill-session -t canopy
 ```
+
+`bash run_pipeline.sh` already detaches with `nohup`. Follow it with these:
+
+```bash
+tail -f condor_logs/pipeline.stdout.txt
+tail -f condor_logs/<sample>.stdout.txt
+```
+
+## Containers
+
+Every tool runs in a container, pinned to an exact tag in `modules/`. See [References](#references) for the
+versions. Canopy pulls the images itself, so you only need this section when changing one.
+
+**Verify an image on the cluster nodes before changing a tag.** An image can exist and still fail: for example,
+`quay.io/biocontainers/flye:2.9.6--py313h7fbb527_1` dies with `SIGILL` (illegal CPU instruction) on our compute
+nodes, so Canopy uses `flye:2.9.4--py310h2b6aa90_0`.
+
+### Find and verify a single-tool image
+
+[`utils/quay_tools.sh`](utils/quay_tools.sh) ships with the pipeline for this. It needs `curl` and `python3`, and
+`verify_image` also needs `apptainer`.
+
+```bash
+source utils/quay_tools.sh
+
+# List available tags
+quay_tags flye
+
+# Check that a tag exists, without downloading it
+image_exists quay.io/biocontainers/flye:2.9.4--py310h2b6aa90_0
+
+# Pull it into a temporary SIF, run a command, then discard it
+verify_image quay.io/biocontainers/flye:2.9.4--py310h2b6aa90_0 "flye --version"
+```
+
+Set `VERIFY_VERBOSE=1` to see pull errors. You can also browse the tags on quay.io, for example at
+<https://quay.io/repository/biocontainers/flye?tab=tags>.
+
+### Find an image with more than one tool
+
+Search the BioContainers hash table, then paste the packages into <https://midnighter.github.io/mulled> to get the
+image:
+
+```bash
 curl -sO https://raw.githubusercontent.com/BioContainers/multi-package-containers/master/combinations/hash.tsv
 grep -E "^minimap2=.*samtools=|^samtools=.*minimap2=" hash.tsv
 ```
 
-Then paste the packages in:
-https://midnighter.github.io/mulled
+## Known limitations
 
-### 2) Use the quay_tools.sh
+- **Organelle filter options:** `--organelle_min_qcov` and `--organelle_min_ident` are accepted but have no effect.
+  The filter uses fixed thresholds of 0.5 and 0.7.
+- **Not yet an automatic NCBI pass:** sequences under 200 bp are not removed, and organelle assemblies are not
+  screened with FCS. Handle both before submission.
+- **R5 and BLASTn:** the docstring in `bin/canopy_contig_rule.py` describes a non-plant hit, but corroboration checks
+  identity and coverage only, not the taxon of the hit. Review `R5_blast` removals in `<sample>_contig_decisions.tsv`.
+- **Report section 7:** the Sylph and BLASTn totals count Kraken-rule candidates only, so contigs removed by FCS-GX
+  alone are not included.
+- **Report gaps:** `pipeline_tools.md` does not list tool versions, and read figures in the report are for the raw read
+  set rather than the nuclear reads.
+- **Reference-guided scaffolds:** RagTag order and orientation follow the reference, so they cannot reveal real
+  structural differences between your sample and the reference.
 
-For single-tool images, for example for `flye` just check `quay.io` directly at:
-https://quay.io/repository/biocontainers/flye?tab=tags
+## Clean up
 
-Or you can find the tag directly, with an API call
+**Delete carefully.** The work directories hold the Nextflow cache, and they may hold the only complete copy of
+intermediate files if a run was interrupted while publishing. After you remove them, the next run starts from the
+beginning. Final genomes in a release do not depend on them.
 
-```
-conda activate base
-curl -s 'https://quay.io/api/v1/repository/biocontainers/flye/tag/?limit=20&onlyActiveTags=true'  | \
-python -m json.tool | grep '"name"' | head -10
-
-# Then pick the most recent one matching the version you want, then build the image reference:
-quay.io/biocontainers/flye:<paste-tag-here>
-
-# That turns into:
-container 'quay.io/biocontainers/flye:2.9.4--py310h2b6aa90_0'
-```
-
-#### Alternative option
-
-`helper-functions/quay_tools.sh` ships in this repo so it's available to anyone who clones
-Canopy. Source it to search through quay.io, verify an image exists and is pullable, and test
-a command for the tool you're looking into using. This works for images that have a single
-tool. If you need/want more than one tool in an image, use the mulled images instead — see
-above.
-
-To use the script, you need a conda nextflow environment with `apptainer` installed.
-
-For example, from the repo root:
-```
-[benucci@scarcity-ap-1 Canopy]$ source helper-functions/quay_tools.sh
-[benucci@scarcity-ap-1 Canopy]$ conda activate nextflow
-(nextflow) [benucci@scarcity-ap-1 Canopy]$ quay_tags flye
-quay.io/biocontainers/flye:2.9.6--py313h7fbb527_1
-quay.io/biocontainers/flye:2.9.6--py312h734f728_1
-quay.io/biocontainers/flye:2.9.6--py311h93bbee8_1
-quay.io/biocontainers/flye:2.9.6--py310h5850263_1
-quay.io/biocontainers/flye:2.9.6--py310h275bdba_0
-quay.io/biocontainers/flye:2.9.6--py39h475c85d_0
-quay.io/biocontainers/flye:2.9.6--py311h2de2dd3_0
-quay.io/biocontainers/flye:2.9.5--py310h275bdba_2
-quay.io/biocontainers/flye:2.9.5--py39h475c85d_2
-quay.io/biocontainers/flye:2.9.5--py312h5e9d817_2
-...
-
-(nextflow) [benucci@scarcity-ap-1 Canopy]$ verify_image quay.io/biocontainers/flye:2.9.4--py310h2b6aa90_0
-[OK pull] quay.io/biocontainers/flye:2.9.4--py310h2b6aa90_0  (no command check)
-(nextflow) [benucci@scarcity-ap-1 Canopy]$ verify_image quay.io/biocontainers/flye:2.9.4--py310h2b6aa90_0 "flye --version"
-[OK] quay.io/biocontainers/flye:2.9.4--py310h2b6aa90_0  (flye --version works)
-(nextflow) [benucci@scarcity-ap-1 Canopy]$
-```
-
-> **Known broken image:** `quay.io/biocontainers/flye:2.9.6--py313h7fbb527_1` dies with SIGILL
-> (illegal CPU instruction) on the Condor compute nodes. Use `2.9.4--py310h2b6aa90_0` instead —
-> see `CLAUDE.md` for the full container-verification policy.
-
-# Start interactive sessions in scarcity
-
-## Method 1: tmux (recommended)
-
-```
-# Start a new session named "canopy"
-tmux new -s canopy
-
-# Inside tmux, launch all five samples
-cd /mnt/cephfs/linuxhome/benucci/Canopy
-bash run_pipeline.sh
-```
-
-<div style="padding: 15px; border: 1px solid #007bcc; background-color: #f0f8ff; border-radius: 5px;"> 
-    <strong>More about tmux use:</strong> To Detach from tmux (leaves it running), press <code>Ctrl-B</code>, then <code>D</code>. Now you can close your laptop, log out, whatever. If you want to copy output on the terminal you can press <code>Ctrl + b</code> then release. Press the <code>[</code> key (this enters "copy mode"). Use your <code>Up/Down</code> arrow keys or <code>Page Up/Page Down</code> to scroll through your output. Press <code>q</code> to exit scroll mode and return to typing. 
-</div>
-
-To reconnect later from anywhere:
-```
-ssh scarcity-ap-1.glbrc.org
-tmux attach -t canopy
-```
-
-## Method 2: nohup
-Simpler but less interactive — no live progress bars to look at:
-
-```
-bash run_pipeline.sh
-
-# Check progress later:
-tail -f condor_logs/pipeline.stdout.txt
-cat condor_logs/pipeline.pid
-```
-
-# To clean up and start a complete new session
-
-```
-cd /mnt/cephfs/linuxhome/benucci/Canopy
-
-# Remove per-sample work directories (cached task outputs — these are the big ones)
+```bash
+# Task directories and cache
 rm -rf nf-work-*
 
-# The .nextflow hidden directory (history, cache metadata, session info)
-rm -rf .nextflow/
+# Nextflow session state in the launch directories
+rm -rf .nextflow/ .canopy-run-*/
+rm -f .nextflow.log*
 
-# The published results from previous runs (back them up first if needed)
+# Published results: back up anything you want to keep first
 rm -rf results results_*/
 
-# Any leftover log files
-rm -f .nextflow.log* nextflow_report*.html timeline*.html trace*.txt
-```
-
-And to cancel a `tmux` session, after closing it
-
-```
-tmux kill-session -t canopy
-tmux ls    # should now say "no server running"
-```
-
-
-# Additional cleanups
-
-## Check and clean the apptainer cache
-```
+# Container image cache
 apptainer cache list -v
 apptainer cache clean
 ```
+
+## References
+
+Please cite the tools you use. Versions are the ones pinned in `modules/` and used for the current results.
+
+### Workflow and containers
+
+| Tool | Version | Reference |
+|---|---|---|
+| Nextflow | 26.04.1 | Di Tommaso P, et al. Nextflow enables reproducible computational workflows. *Nat Biotechnol* 2017;35:316–319. [doi:10.1038/nbt.3820](https://doi.org/10.1038/nbt.3820) |
+| Apptainer (Singularity) | 1.4.5 | Kurtzer GM, et al. Singularity: Scientific containers for mobility of compute. *PLoS ONE* 2017;12:e0177459. [doi:10.1371/journal.pone.0177459](https://doi.org/10.1371/journal.pone.0177459) |
+| BioContainers | | da Veiga Leprevost F, et al. BioContainers: an open-source and community-driven framework for software standardization. *Bioinformatics* 2017;33:2580–2582. [doi:10.1093/bioinformatics/btx192](https://doi.org/10.1093/bioinformatics/btx192) |
+| nf-metro | 2.1.0 | Workflow map. <https://github.com/seqeralabs/nf-metro> |
+
+### Read processing and mapping
+
+| Tool | Version | Reference |
+|---|---|---|
+| NanoPlot | 1.43.0 | De Coster W, Rademakers R. NanoPack2: population-scale evaluation of long-read sequencing data. *Bioinformatics* 2023;39:btad311. [doi:10.1093/bioinformatics/btad311](https://doi.org/10.1093/bioinformatics/btad311) |
+| Filtlong | 0.2.1 | Wick R. <https://github.com/rrwick/Filtlong> |
+| minimap2 | 2.30 (2.31 for HapDup) | Li H. Minimap2: pairwise alignment for nucleotide sequences. *Bioinformatics* 2018;34:3094–3100. [doi:10.1093/bioinformatics/bty191](https://doi.org/10.1093/bioinformatics/bty191). Li H. New strategies to improve minimap2 alignment accuracy. *Bioinformatics* 2021;37:4572–4574. [doi:10.1093/bioinformatics/btab705](https://doi.org/10.1093/bioinformatics/btab705) |
+| SAMtools | 1.21 (1.6 for HapDup) | Danecek P, et al. Twelve years of SAMtools and BCFtools. *GigaScience* 2021;10:giab008. [doi:10.1093/gigascience/giab008](https://doi.org/10.1093/gigascience/giab008) |
+| SeqKit | 2.13.0 | Shen W, et al. SeqKit: a cross-platform and ultrafast toolkit for FASTA/Q file manipulation. *PLoS ONE* 2016;11:e0163962. [doi:10.1371/journal.pone.0163962](https://doi.org/10.1371/journal.pone.0163962). Shen W, et al. SeqKit2: a Swiss army knife for sequence and alignment processing. *iMeta* 2024;3:e191. [doi:10.1002/imt2.191](https://doi.org/10.1002/imt2.191) |
+
+### Assembly, polishing and scaffolding
+
+| Tool | Version | Reference |
+|---|---|---|
+| Flye | 2.9.4 | Kolmogorov M, et al. Assembly of long, error-prone reads using repeat graphs. *Nat Biotechnol* 2019;37:540–546. [doi:10.1038/s41587-019-0072-8](https://doi.org/10.1038/s41587-019-0072-8) |
+| Oatk | 1.0 | Zhou C, et al. Oatk: a de novo assembly tool for complex plant organelle genomes. *Genome Biol* 2025;26:235. [doi:10.1186/s13059-025-03676-6](https://doi.org/10.1186/s13059-025-03676-6) |
+| Bandage | 0.9.0 | Wick RR, et al. Bandage: interactive visualization of de novo genome assemblies. *Bioinformatics* 2015;31:3350–3352. [doi:10.1093/bioinformatics/btv383](https://doi.org/10.1093/bioinformatics/btv383) |
+| Medaka | 2.2.1 | Oxford Nanopore Technologies. <https://github.com/nanoporetech/medaka> |
+| purge_dups | 1.2.6 | Guan D, et al. Identifying and removing haplotypic duplication in primary genome assemblies. *Bioinformatics* 2020;36:2896–2898. [doi:10.1093/bioinformatics/btaa025](https://doi.org/10.1093/bioinformatics/btaa025) |
+| HapDup | 0.12 | Kolmogorov M, et al. Scalable Nanopore sequencing of human genomes provides a comprehensive view of haplotype-resolved variation and methylation. *Nat Methods* 2023;20:1483–1492. [doi:10.1038/s41592-023-01993-x](https://doi.org/10.1038/s41592-023-01993-x) |
+| RagTag | 2.1.0 | Alonge M, et al. Automated assembly scaffolding using RagTag elevates a new tomato system for high-throughput genome editing. *Genome Biol* 2022;23:258. [doi:10.1186/s13059-022-02823-7](https://doi.org/10.1186/s13059-022-02823-7) |
+
+### QC and contaminant screening
+
+| Tool | Version | Reference |
+|---|---|---|
+| QUAST | 5.3.0 | Gurevich A, et al. QUAST: quality assessment tool for genome assemblies. *Bioinformatics* 2013;29:1072–1075. [doi:10.1093/bioinformatics/btt086](https://doi.org/10.1093/bioinformatics/btt086). Mikheenko A, et al. Versatile genome assembly evaluation with QUAST-LG. *Bioinformatics* 2018;34:i142–i150. [doi:10.1093/bioinformatics/bty266](https://doi.org/10.1093/bioinformatics/bty266) |
+| BUSCO | 5.8.0 | Manni M, et al. BUSCO update: novel and streamlined workflows along with broader and deeper phylogenetic coverage for scoring of eukaryotic, prokaryotic, and viral genomes. *Mol Biol Evol* 2021;38:4647–4654. [doi:10.1093/molbev/msab199](https://doi.org/10.1093/molbev/msab199) |
+| Qualimap | 2.3 | Okonechnikov K, et al. Qualimap 2: advanced multi-sample quality control for high-throughput sequencing data. *Bioinformatics* 2016;32:292–294. [doi:10.1093/bioinformatics/btv566](https://doi.org/10.1093/bioinformatics/btv566) |
+| MultiQC | 1.25.1 | Ewels P, et al. MultiQC: summarize analysis results for multiple tools and samples in a single report. *Bioinformatics* 2016;32:3047–3048. [doi:10.1093/bioinformatics/btw354](https://doi.org/10.1093/bioinformatics/btw354) |
+| Kraken 2 | 2.1.3 | Wood DE, et al. Improved metagenomic analysis with Kraken 2. *Genome Biol* 2019;20:257. [doi:10.1186/s13059-019-1891-0](https://doi.org/10.1186/s13059-019-1891-0) |
+| BlobTools | 1.1.1 | Laetsch DR, Blaxter ML. BlobTools: interrogation of genome assemblies. *F1000Research* 2017;6:1287. [doi:10.12688/f1000research.12232.1](https://doi.org/10.12688/f1000research.12232.1) |
+| Sylph | 0.9.0 | Shaw J, Yu YW. Rapid species-level metagenome profiling and containment estimation with sylph. *Nat Biotechnol* 2025;43:1348–1359. [doi:10.1038/s41587-024-02412-y](https://doi.org/10.1038/s41587-024-02412-y) |
+| BLAST+ | 2.15.0 | Camacho C, et al. BLAST+: architecture and applications. *BMC Bioinformatics* 2009;10:421. [doi:10.1186/1471-2105-10-421](https://doi.org/10.1186/1471-2105-10-421) |
+| FCS-GX | 0.4.1 | Astashyn A, et al. Rapid and sensitive detection of genome contamination at scale with FCS-GX. *Genome Biol* 2024;25:60. [doi:10.1186/s13059-024-03198-7](https://doi.org/10.1186/s13059-024-03198-7) |
+| FCS-adaptor | 0.5.5 | NCBI Foreign Contamination Screen. <https://github.com/ncbi/fcs> |
+
+### Databases and references
+
+| Resource | Version | Source |
+|---|---|---|
+| Kraken2 PlusPFP | Build 2026-06-26 | Prebuilt index. <https://benlangmead.github.io/aws-indexes/k2> |
+| GTDB (Sylph sketch) | R226 | Parks DH, et al. GTDB: an ongoing census of bacterial and archaeal diversity through a phylogenetically consistent, rank normalized and complete genome-based taxonomy. *Nucleic Acids Res* 2022;50:D785–D794. [doi:10.1093/nar/gkab776](https://doi.org/10.1093/nar/gkab776) |
+| NCBI `core_nt` | Local copy | <https://ftp.ncbi.nlm.nih.gov/blast/db/> |
+| FCS-GX database | Build 2023-01-24 | <https://github.com/ncbi/fcs/wiki/FCS-GX> |
+| OatkDB | v20230921, embryophyta | <https://github.com/c-zhou/OatkDB> |
+| BUSCO lineage | `poales_odb10` | <https://busco-data.ezlab.org/v5/data/lineages/> |
+| Fungal references | GCF_000149305.1, GCF_000002855.4 | *Rhizopus delemar* and *Aspergillus niger*, NCBI RefSeq |
+| Sorghum organelles | NC_008602, NC_008360 | Chloroplast and mitochondrion, NCBI RefSeq |
+| Sorghum nuclear | `Sbicolor_730_v5.0` | *Sorghum bicolor* v5.0, Phytozome |

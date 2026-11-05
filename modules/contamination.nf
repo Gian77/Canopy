@@ -498,3 +498,250 @@ process REMOVE_CONTAMINANTS {
     fi
     """
 }
+
+// NCBI FCS-GX: genome cross-species screen, run on the full genome ('full', input to the removal
+// rule) and again on the published genome ('final', which must come back clean). The ~470 GiB DB
+// is copied to /dev/shm because memory-mapping it over cephfs is not viable. FCS rejects '+' in
+// IDs, so it is replaced with 'plus' here and restored by canopy_contig_rule.py.
+process FCS_GX_SCREEN {
+    tag              { "${sample_id}_${stage}" }
+    label            'fcs_gx'
+    errorStrategy    { task.exitStatus in [132, 137, 139, 143, 247] ? 'retry' : 'terminate' }
+    publishDir       { "${params.outdir}/qc/contamination/${sample_id}/fcs_gx" }, mode: 'copy'
+    container        'quay.io/biocontainers/ncbi-fcs-gx:0.4.1--h4ac6f70_0'
+    containerOptions '--bind /dev/shm'
+
+    input:
+    tuple val(sample_id), val(stage), path(assembly)
+    path gx_db
+
+    output:
+    tuple val(sample_id), val(stage), path("${sample_id}_${stage}.fcs_gx_report.txt"), emit: report
+    path "${sample_id}_${stage}.taxonomy.rpt", emit: taxonomy
+
+    script:
+    def base = "${sample_id}_${stage}"
+    """
+    SHM=/dev/shm/gxdb_${base}_\$\$
+    trap 'rm -rf "\$SHM"' EXIT
+    trap 'exit 143' INT TERM
+    # The container's df is BusyBox, which has no --output.
+    avail=\$(df -k /dev/shm | tail -1 | awk '{ print int(\$(NF-2) / 1048576) }')
+    if [ "\${avail:-0}" -lt 480 ]; then
+        echo "ERROR: /dev/shm has \${avail:-0}G free; FCS-GX needs 480G" >&2
+        exit 1
+    fi
+    mkdir -p "\$SHM"
+    cp ${gx_db}/all.* "\$SHM"/
+    sed '/^>/ { s/ .*//; s/+/plus/g }' ${assembly} > ${base}.input.fasta
+    GX_NUM_CORES=${task.cpus} run_gx.py --fasta ${base}.input.fasta \\
+        --tax-id ${params.fcs_gx_taxid} --gx-db "\$SHM/all" --out-dir . --out-basename ${base}
+    rm -f ${base}.input.fasta
+    """
+}
+
+// NCBI FCS-adaptor, eukaryote mode. The image has no bash, which Nextflow's task wrapper needs,
+// so the task runs on the node and calls the container itself.
+process FCS_ADAPTOR_SCREEN {
+    tag           { "${sample_id}_${stage}" }
+    label         'qc'
+    errorStrategy { task.exitStatus in [132, 137, 139, 143, 247] ? 'retry' : 'terminate' }
+    publishDir    { "${params.outdir}/qc/contamination/${sample_id}/fcs_adaptor" }, mode: 'copy'
+
+    input:
+    tuple val(sample_id), val(stage), path(assembly)
+
+    output:
+    tuple val(sample_id), val(stage), path("${sample_id}_${stage}.fcs_adaptor_report.txt"), emit: report
+
+    script:
+    def base = "${sample_id}_${stage}"
+    """
+    export APPTAINER_CACHEDIR="${System.getenv('HOME')}/.apptainer_cache"
+    sed '/^>/ { s/ .*//; s/+/plus/g }' ${assembly} > ${base}.input.fasta
+    apptainer exec --bind "\$PWD" docker://${params.fcs_adaptor_image} \\
+        /app/fcs/bin/av_screen_x -o "\$PWD/adaptor_out" --euk "\$PWD/${base}.input.fasta"
+    cp adaptor_out/fcs_adaptor_report.txt ${base}.fcs_adaptor_report.txt
+    rm -rf ${base}.input.fasta adaptor_out
+    """
+}
+
+// Fungal alignment for the removal rule. Kraken's PlusPFP has no Rhizopus, so whole fungal
+// genomes supply evidence it cannot give. Alignment alone is not proof: conserved high-copy plant
+// contigs also align, which is why the rule also requires little alignment to the sorghum reference.
+process ALIGN_UNPLACED_TO_FUNGI {
+    tag        { sample_id }
+    label      'map'
+    publishDir { "${params.outdir}/qc/contamination/${sample_id}" }, mode: 'copy'
+    container  'quay.io/biocontainers/minimap2:2.30--h577a1d6_0'
+    containerOptions '--unsquash'
+
+    input:
+    tuple val(sample_id), path(assembly), path(agp)
+    path fungal_refs
+
+    output:
+    tuple val(sample_id), path("${sample_id}_unplaced_fungal_aligned.tsv"), emit: aligned
+
+    script:
+    """
+    awk -F '\\t' '!/^#/ && NF { n[\$1]++; type[\$1]=\$5; comp[\$1]=\$6 }
+         END { for (o in n) if (n[o] == 1 && type[o] == "W" && comp[o] == o) print o }' \\
+        ${agp} > unplaced_ids.txt
+
+    awk 'NR == FNR { want[\$1] = 1; next }
+         /^>/ { name = substr(\$1, 2); keep = (name in want) }
+         keep' unplaced_ids.txt ${assembly} > unplaced.fasta
+
+    if [ -s unplaced.fasta ]; then
+        minimap2 -x asm20 --secondary=no -t ${task.cpus} ${fungal_refs} unplaced.fasta > fungal.paf
+    else
+        : > fungal.paf
+    fi
+
+    sort -k1,1 -k3,3n fungal.paf | awk -F '\\t' -v OFS='\\t' '
+        function flush() { if (q != "") print q, l, c, c / l, sp }
+        BEGIN { print "contig", "length", "aligned_bp", "aligned_frac", "species" }
+        \$1 != q { flush(); q = \$1; l = \$2; c = 0; e = -1; split(\$6, a, "|"); sp = a[1] }
+        {
+            if (\$3 > e) { c += \$4 - \$3; e = \$4 }
+            else if (\$4 > e) { c += \$4 - e; e = \$4 }
+        }
+        END { flush() }' > ${sample_id}_unplaced_fungal_aligned.tsv
+    rm -f unplaced.fasta
+    """
+}
+
+// Combines all evidence into one decision per sequence; see bin/canopy_contig_rule.py for the rule.
+process APPLY_CONTAMINANT_RULE {
+    tag           { sample_id }
+    label         'qc_light'
+    errorStrategy 'terminate'
+    publishDir    { "${params.outdir}/qc/contamination/${sample_id}/decisions" }, mode: 'copy'
+    container     'quay.io/biocontainers/blobtools:1.1.1--py_1'
+
+    input:
+    tuple val(sample_id), path(audit), path(blob_files), path(fcs_report), path(fungal), path(blast)
+    path rule_script
+
+    output:
+    tuple val(sample_id), path("${sample_id}_contig_decisions.tsv"),      emit: decisions
+    tuple val(sample_id), path("${sample_id}_contaminant_ids.txt"),       emit: ids
+    tuple val(sample_id), path("${sample_id}_review_ids.txt"),            emit: review_ids
+    tuple val(sample_id), path("${sample_id}_contamination_summary.txt"), emit: summary
+
+    script:
+    """
+    BLOB_TABLE=\$(find -L . -maxdepth 1 -name 'blobtax_*.blobDB.table.txt' | head -1)
+    python3 ${rule_script} --sample ${sample_id} --audit ${audit} --blob-table "\$BLOB_TABLE" \\
+        --fcs-report ${fcs_report} --fungal ${fungal} --blast ${blast} \\
+        --min-fungal ${params.contam_min_fungal_frac} --max-ref ${params.contam_max_ref_aligned}
+    """
+}
+
+// Writes <sample>_final and <sample>_full_flagged; see bin/canopy_write_genomes.py.
+process WRITE_GENOME_VERSIONS {
+    tag           { sample_id }
+    label         'qc_light'
+    errorStrategy 'terminate'
+    publishDir    { "${params.outdir}/assembly/final/${sample_id}" }, mode: 'copy'
+    container     'quay.io/biocontainers/blobtools:1.1.1--py_1'
+
+    input:
+    tuple val(sample_id), path(assembly), path(agp), path(decisions), val(stage), path(adaptor_report)
+    path writer_script
+
+    output:
+    tuple val(sample_id), path("${sample_id}_final.fasta"), emit: assembly
+    tuple val(sample_id), path("${sample_id}_final.agp"), path("${sample_id}_full_flagged.fasta"),
+          path("${sample_id}_full_flagged.agp"), path("${sample_id}_adapter_trims.tsv"), emit: extras
+    tuple val(sample_id), path("${sample_id}_final_stats.txt"), emit: stats
+
+    script:
+    """
+    python3 ${writer_script} --sample ${sample_id} --fasta ${assembly} --agp ${agp} \\
+        --decisions ${decisions} --adaptor-report ${adaptor_report}
+    """
+}
+
+// Second round for a genome whose final screen had hits: the same rule sees both FCS-GX reports,
+// then the first-round genome is trimmed again. Its files are staged in round1/ because the
+// outputs have the same names. Sequences stay in both rounds' FASTAs under 'plus' IDs, so the
+// decision table is converted to match them for the writer.
+process REFINE_GENOME_VERSIONS {
+    tag           { sample_id }
+    label         'qc_light'
+    errorStrategy 'terminate'
+    publishDir    { "${params.outdir}/qc/contamination/${sample_id}/decisions" }, mode: 'copy', overwrite: true,
+                  pattern: "*_{contig_decisions.tsv,contaminant_ids.txt,review_ids.txt,contamination_summary.txt}"
+    publishDir    { "${params.outdir}/assembly/final/${sample_id}" }, mode: 'copy', overwrite: true,
+                  pattern: "*_{final.fasta,final.agp,full_flagged.fasta,full_flagged.agp,adapter_trims.tsv,final_stats.txt}"
+    container     'quay.io/biocontainers/blobtools:1.1.1--py_1'
+
+    input:
+    tuple val(sample_id), path(audit), path(blob_files), path(fcs_full), path(fungal), path(blast),
+          path(flagged, stageAs: 'round1/*'), path(flagged_agp, stageAs: 'round1/*'),
+          path(prior_trims, stageAs: 'round1/*'), path(gx_final), path(adaptor_final)
+    path rule_script
+    path writer_script
+    path merge_script
+
+    output:
+    tuple val(sample_id), path("${sample_id}_final.fasta"), emit: assembly
+    tuple val(sample_id), path("${sample_id}_final.agp"), path("${sample_id}_full_flagged.fasta"),
+          path("${sample_id}_full_flagged.agp"), path("${sample_id}_adapter_trims.tsv"), emit: extras
+    tuple val(sample_id), path("${sample_id}_final_stats.txt"), emit: stats
+    tuple val(sample_id), path("${sample_id}_contig_decisions.tsv"), emit: decisions
+    tuple val(sample_id), path("${sample_id}_contamination_summary.txt"), emit: summary
+    path "${sample_id}_contaminant_ids.txt"
+    path "${sample_id}_review_ids.txt"
+
+    script:
+    """
+    BLOB_TABLE=\$(find -L . -maxdepth 1 -name 'blobtax_*.blobDB.table.txt' | head -1)
+    cat ${fcs_full} ${gx_final} > gx_both_rounds.txt
+    python3 ${rule_script} --sample ${sample_id} --audit ${audit} --blob-table "\$BLOB_TABLE" \\
+        --fcs-report gx_both_rounds.txt --fungal ${fungal} --blast ${blast} \\
+        --min-fungal ${params.contam_min_fungal_frac} --max-ref ${params.contam_max_ref_aligned}
+    awk -F '\\t' -v OFS='\\t' 'NR > 1 { gsub(/\\+/, "plus", \$1) } { print }' \\
+        ${sample_id}_contig_decisions.tsv > decisions_safe_ids.tsv
+    python3 ${writer_script} --sample ${sample_id} --fasta ${flagged} --agp ${flagged_agp} \\
+        --decisions decisions_safe_ids.tsv --adaptor-report ${adaptor_final}
+    python3 ${merge_script} --prior ${prior_trims} --new ${sample_id}_adapter_trims.tsv \\
+        --decisions ${sample_id}_contig_decisions.tsv --stats ${sample_id}_final_stats.txt
+    rm -f gx_both_rounds.txt decisions_safe_ids.tsv
+    """
+}
+
+// Screens of the published FASTA, as one key=value file for the report. Hits are reported rather
+// than failing the run, so the evidence is published for inspection.
+process NCBI_SCREEN_SUMMARY {
+    tag        { sample_id }
+    label      'qc_light'
+    publishDir { "${params.outdir}/qc/contamination/${sample_id}" }, mode: 'copy'
+    container  'quay.io/biocontainers/seqkit:2.13.0--he881be0_0'
+
+    input:
+    tuple val(sample_id), path(stats), path(gx_report), path(adaptor_report)
+
+    output:
+    tuple val(sample_id), path("${sample_id}_ncbi_screen.txt"), emit: summary
+
+    script:
+    """
+    gx_exclude=\$(awk -F '\\t' '!/^#/ && \$5 == "EXCLUDE"' ${gx_report} | wc -l)
+    gx_other=\$(awk -F '\\t' '!/^#/ && NF && \$5 != "EXCLUDE"' ${gx_report} | wc -l)
+    adaptor=\$(awk '!/^#/ && NF' ${adaptor_report} | wc -l)
+    db=\$(head -1 ${gx_report} | grep -o '"build-date": "[0-9-]*"' | grep -o '[0-9][0-9-]*' | head -1)
+    status=PASS
+    if [ "\$gx_exclude" != 0 ] || [ "\$gx_other" != 0 ] || [ "\$adaptor" != 0 ]; then status=CHECK; fi
+    {
+        cat ${stats}
+        echo "gx_exclude=\$gx_exclude"
+        echo "gx_other_actions=\$gx_other"
+        echo "adaptor_hits=\$adaptor"
+        echo "gx_db_build=\${db:-unknown}"
+        echo "screen_status=\$status"
+    } > ${sample_id}_ncbi_screen.txt
+    """
+}

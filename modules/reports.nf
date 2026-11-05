@@ -23,7 +23,8 @@ process FINAL_SUMMARY {
           path(busco_decontam,  stageAs: 'busco_decontam_summary.txt'),
           path(contam_summary,  stageAs: 'contam_summary.txt'),
           path(sylph_summary,   stageAs: 'sylph_summary.txt'),
-          path(blast_summary,   stageAs: 'blast_summary.txt')
+          path(blast_summary,   stageAs: 'blast_summary.txt'),
+          path(ncbi_screen,     stageAs: 'ncbi_screen.txt')
 
     output:
     tuple val(sample_id), path("${sample_id}_assembly_summary.md"), emit: summary
@@ -38,6 +39,7 @@ process FINAL_SUMMARY {
     def decontam_ran  = params.flag_contaminants
     def sylph_ran     = params.verify_sylph
     def blast_ran     = params.verify_blast
+    def fcs_ran       = params.fcs_screen
     def blast_source  = "local BLAST database ${file(params.blast_db).name}"
     """
     #!/usr/bin/env bash
@@ -53,6 +55,8 @@ process FINAL_SUMMARY {
     CONTAM_SUMMARY="contam_summary.txt"
     SYLPH_SUMMARY="sylph_summary.txt"
     BLAST_SUMMARY="blast_summary.txt"
+    NCBI_SCREEN="ncbi_screen.txt"
+    ncbi() { grep "^\$1=" "\$NCBI_SCREEN" 2>/dev/null | cut -d= -f2 || true; }
     # Headline BUSCO = the published final genome's (default medaka).
     if [ "${final_asm}" = "purge" ]; then BUSCO="\$BUSCO_PURGE"; else BUSCO="\$BUSCO_MEDAKA"; fi
     # When contaminants were removed, the decontam genome is the published nuclear genome.
@@ -311,7 +315,7 @@ process FINAL_SUMMARY {
             else if (pct >= 50) anch="moderate anchoring"
             else                anch="low anchoring -- many contigs unplaced, possibly from highly divergent or novel sequence"
             fold=int(n50s/n50c)
-            printf "%s (%d%% of bases placed on chromosomes). N50 improved %d-fold: %.1f kb (contigs) -> %.1f Mb (scaffolds).", anch, pct, fold, n50c/1e3, n50s/1e6
+            printf "%s (%d%% of bases placed on chromosomes). Flye contig N50 is %.1f kb; scaffold N50 is %.1f Mb because RagTag orders contigs along the reference, so it does not measure assembly contiguity.", anch, pct, n50c/1e3, n50s/1e6
         }'
     }
 
@@ -449,6 +453,12 @@ process FINAL_SUMMARY {
       echo
       echo "> **Interpretation:** \$(scaffold_interp)"
       echo
+      if [ "${fcs_ran}" = "true" ]; then
+          echo "> Contig N50 of the published genome, after RagTag correction and adapter trimming: \$(ncbi final_contig_n50 | awk '{printf "%.1f kb", \$1/1e3}') across \$(ncbi final_contigs) contigs."
+          echo
+      fi
+      echo "> **Note on reference-guided scaffolding:** chromosome scaffolds take their order and orientation from the reference (Sbicolor v5), and every join is a fixed 100 bp gap of unknown true size. **Inversions and rearrangements relative to the reference get hidden**, so these scaffolds cannot be used as evidence of chromosome structure in this line. RagTag correction also broke contigs where they disagreed with the reference, without read support for each break, which may have split real structural differences."
+      echo
 
       # ── 6. BUSCO (nuclear genome) ─────────────────────────────────────────
       echo "## 6. Published nuclear genome: gene-space completeness (BUSCO — ${busco_lin})"
@@ -462,7 +472,11 @@ process FINAL_SUMMARY {
 
       # ── 7. Contaminant screening (only when --flag_contaminants ran) ───────
       if [ "${decontam_ran}" = "true" ]; then
-          echo "## 7. Contaminant screening (BlobTools + RagTag + reference alignment)"
+          if [ "${fcs_ran}" = "true" ]; then
+              echo "## 7. Contaminant screening (FCS-GX, Kraken2, BLASTn, fungal alignment; GC and coverage as support)"
+          else
+              echo "## 7. Contaminant screening (BlobTools + RagTag + reference alignment)"
+          fi
           echo
           echo "| Metric | Value |"
           echo "|---|---|"
@@ -481,6 +495,13 @@ process FINAL_SUMMARY {
               echo "| Removed or review contigs passing BLASTn thresholds | \$BLAST_CORROBORATED / \$BLAST_TOTAL |"
           fi
           echo
+          if [ "${fcs_ran}" = "true" ]; then
+              echo "> **Interpretation:** \$CONTAM_FLAGGED unplaced contigs (\${CONTAM_MB} Mb) were removed from ${sample}_final.fasta and stay marked in ${sample}_full_flagged.fasta. A contig is removed when FCS-GX says EXCLUDE; FCS-GX says REVIEW and another source agrees; the Kraken2 rule says remove and BLASTn corroborates it; at least ${params.contam_min_fungal_frac} of it aligns to a fungal reference with under ${params.contam_max_ref_aligned} aligned to sorghum; or BLASTn corroborates a non-plant hit with under ${params.contam_max_ref_aligned} aligned to sorghum. Removed by rule: \$(grep '^removed_by_rule=' "\$CONTAM_SUMMARY" | cut -d= -f2). Contigs placed on chromosomes are never removed automatically; those with an FCS-GX call: \$(grep '^placed_with_fcs_call=' "\$CONTAM_SUMMARY" | cut -d= -f2). \$REVIEW_CONTIGS contigs (\${REVIEW_MB} Mb) with conflicting evidence remain in the genome, marked 'review' in ${sample}_contig_decisions.tsv."
+              echo
+              echo "> **GC and coverage** are recorded for every sequence and support interpretation but do not trigger removal: GC alone would remove real plant contigs, and contaminant coverage overlaps plant coverage."
+              echo
+              echo "> **NCBI screens of ${sample}_final.fasta (status \$(ncbi screen_status)):** FCS-GX EXCLUDE \$(ncbi gx_exclude), other FCS-GX actions \$(ncbi gx_other_actions), FCS-adaptor hits \$(ncbi adaptor_hits). Before this check, \$(ncbi adapter_bases_trimmed) bp of adapter and flanking sequence were trimmed from \$(ncbi adapter_contig_ends_trimmed) contigs (${sample}_adapter_trims.tsv). FCS-GX database build \$(ncbi gx_db_build), the latest available; NCBI may screen with a newer one, so a pass here is strong evidence rather than a guarantee of acceptance."
+          else
           echo "> **Interpretation:** \$CONTAM_FLAGGED contigs (\${CONTAM_MB} Mb) were moved out of" \
                "the nuclear genome into ${sample}_removed_contigs.fasta -- simultaneously" \
                "non-${params.contam_target_phylum} by BlobTools, unplaced by RagTag, and under" \
@@ -488,11 +509,13 @@ process FINAL_SUMMARY {
                "\$REVIEW_CONTIGS unplaced, unaligned contigs (\${REVIEW_MB} Mb) with no taxonomy call" \
                "remain in the nuclear genome and need review (${sample}_review_contigs.txt). The" \
                "audit table gives the decision for every contig."
+          fi
           if [ "${sylph_ran}" = "true" ]; then
               echo
               echo "> Sylph corroboration: \$SYLPH_CORROBORATED of \$SYLPH_TOTAL removed or review contigs" \
                    "had a confident (>=${params.sylph_min_ani}% adjusted ANI) containment match to a" \
                    "bacterial or archaeal GTDB genome. See the Sylph table for per-contig detail." \
+                   "GTDB has no fungi, so Sylph cannot confirm fungal contigs." \
                    "This is advisory only and did not change what was removed. A 'no' is not" \
                    "disagreement: short contigs may lack enough sequence for an ANI estimate, and" \
                    "taxa without a close GTDB genome cannot match."
@@ -502,8 +525,7 @@ process FINAL_SUMMARY {
               echo "> BLASTn corroboration: \$BLAST_CORROBORATED of \$BLAST_TOTAL removed or review contigs" \
                    "met the configured identity (>=${params.blast_min_identity}%) and query-coverage" \
                    "(>=${params.blast_min_qcov}%) thresholds against the ${blast_source}, with coverage" \
-                   "summed across all alignments to the best subject. This is advisory only and did" \
-                   "not change what was removed. A 'no' is not disagreement: a contig without a close" \
+                   "summed across all alignments to the best subject. A 'no' is not disagreement: a contig without a close" \
                    "complete genome in the database can miss the coverage threshold, so read the" \
                    "best_title column of the BLAST table."
           fi
@@ -515,7 +537,10 @@ process FINAL_SUMMARY {
       echo
       echo "## Conclusion"
       echo
-      if [ "${decontam_ran}" = "true" ]; then
+      if [ "${fcs_ran}" = "true" ]; then
+          echo "**Use ${sample}_final.fasta as the nuclear genome.** It excludes the \$CONTAM_FLAGGED contaminant contigs (\${CONTAM_MB} Mb) and has adapters trimmed from contig ends. ${sample}_full_flagged.fasta holds every contig, trimmed the same way, with the decision in each header. The headline contig N50 below is measured on the Flye assembly before these steps; section 5 gives the published genome's value."
+          echo
+      elif [ "${decontam_ran}" = "true" ]; then
           echo "**Use ${sample}_nuclear.fasta as the nuclear genome.** It excludes the \$CONTAM_FLAGGED contigs (\${CONTAM_MB} Mb) in ${sample}_removed_contigs.fasta and still contains the \$REVIEW_CONTIGS review contigs (\${REVIEW_MB} Mb). The figures below describe this genome, except the contig N50, which is measured on the Flye assembly before removal."
           echo
       fi
@@ -588,7 +613,9 @@ process PACKAGE_RESULTS {
           path(sylph_corroboration, stageAs: 'sylph_corroboration.tsv'),
           val(has_sylph),
           path(blast_corroboration, stageAs: 'blast_corroboration.tsv'),
-          val(has_blast)
+          val(has_blast),
+          path(final_set, stageAs: 'final_set/*'),
+          val(has_final)
 
     output:
     tuple val(sample_id), path("${sample_id}_assembly.zip"), emit: zip
@@ -613,7 +640,13 @@ process PACKAGE_RESULTS {
     fi
 
     # The published nuclear genome excludes removed contigs when screening ran, and its AGP matches.
-    if [ "${has_decontam}" = "true" ]; then
+    if [ "${has_final}" = "true" ]; then
+        cp decontam.fasta          "\$PKG/${sample_id}_final.fasta"
+        cp contamination_audit.tsv "\$PKG/${sample_id}_contig_decisions.tsv"
+        cp final_set/* "\$PKG/"
+        mkdir -p "\$PKG/screening"
+        mv "\$PKG"/*.fcs_gx_report.txt "\$PKG"/*.fcs_adaptor_report.txt "\$PKG/${sample_id}_ncbi_screen.txt" "\$PKG/screening/"
+    elif [ "${has_decontam}" = "true" ]; then
         cp decontam.fasta            "\$PKG/${sample_id}_nuclear.fasta"
         cp removed_contigs.fasta     "\$PKG/${sample_id}_removed_contigs.fasta"
         cp contamination_audit.tsv   "\$PKG/${sample_id}_contamination_audit.tsv"
@@ -626,10 +659,12 @@ process PACKAGE_RESULTS {
     fi
 
     # The AGP must describe exactly the sequences in the published FASTA.
-    fasta_n=\$(grep -c '^>' "\$PKG/${sample_id}_nuclear.fasta")
-    agp_n=\$(awk -F'\\t' '!/^#/ && NF && !seen[\$1]++ { n++ } END { print n + 0 }' "\$PKG/${sample_id}_nuclear.agp")
+    NAME=${sample_id}_nuclear
+    if [ "${has_final}" = "true" ]; then NAME=${sample_id}_final; fi
+    fasta_n=\$(grep -c '^>' "\$PKG/\$NAME.fasta")
+    agp_n=\$(awk -F'\\t' '!/^#/ && NF && !seen[\$1]++ { n++ } END { print n + 0 }' "\$PKG/\$NAME.agp")
     if [ "\$fasta_n" != "\$agp_n" ]; then
-        echo "ERROR: ${sample_id}_nuclear.fasta has \$fasta_n sequences but its AGP has \$agp_n objects" >&2
+        echo "ERROR: \$NAME.fasta has \$fasta_n sequences but its AGP has \$agp_n objects" >&2
         exit 1
     fi
 
@@ -649,23 +684,31 @@ ${sample_id}_assembly_summary.md   -- narrative QC summary (start here)
 pipeline_tools.md                  -- tool/version rationale for the whole pipeline
 
 The genome files
-${sample_id}_nuclear.fasta          -- nuclear genome to use, chromosome-scaffolded, with
-                                       contaminant contigs removed when screening ran
+${sample_id}_final.fasta            -- nuclear genome to use: Medaka-polished, chromosome-scaffolded,
+                                       contaminants removed, adapters trimmed (with --fcs_screen;
+                                       otherwise this file is ${sample_id}_nuclear.fasta)
+${sample_id}_full_flagged.fasta     -- every contig, same sequence and IDs, with the decision and
+                                       evidence taxon in each header (with --fcs_screen)
+Note: scaffolds follow the reference with fixed 100 bp gaps, so inversions and rearrangements
+relative to the reference get hidden. '+' in sequence IDs was replaced with 'plus'.
+
 ${sample_id}_chloroplast.fasta      -- chloroplast assembly
 ${sample_id}_mitochondria.fasta     -- mitochondrial assembly
-${sample_id}_removed_contigs.fasta  -- whole contigs removed from the nuclear genome, unchanged,
-                                       kept for checking; empty if none were removed; absent
-                                       if contaminant screening did not run
+${sample_id}_removed_contigs.fasta  -- removed contigs; only without --fcs_screen
 
 Supporting files
-${sample_id}_nuclear.agp            -- maps every sequence to the reference chromosome
+${sample_id}_final.agp, _full_flagged.agp
+                                    -- maps every sequence to the reference chromosome
                                        RagTag placed it on (column 1 = "ChrNN_RagTag"),
                                        or shows it under its own contig name if unplaced.
-${sample_id}_contamination_audit.tsv -- decision (keep/review/remove) and evidence per contig
-${sample_id}_review_contigs.txt     -- contigs with no taxonomy call that stay in the nuclear
-                                       genome until checked, for example by gene origin
+${sample_id}_contig_decisions.tsv   -- decision (keep/review/remove), rule, GC, coverage and evidence
+                                       per sequence (_contamination_audit.tsv without --fcs_screen)
+${sample_id}_adapter_trims.tsv      -- bases trimmed from each contig end
+screening/                          -- FCS-GX and FCS-adaptor reports, before ('full') and after
+                                       ('final') cleaning; 'final2' means a second cleaning round was
+                                       needed. _ncbi_screen.txt holds the outcome
 ${sample_id}_sylph_corroboration.tsv, ${sample_id}_blast_corroboration.tsv
-                                    -- advisory checks of removed and review contigs
+                                    -- BLASTn and Sylph checks of candidate contigs. GTDB has no fungi.
 quast_*_report.html                 -- open in a browser; self-contained, no other files needed
 busco_nuclear_final_summary.txt     -- gene-space completeness of ${sample_id}_nuclear.fasta
 blobtools/ (if present)             -- contamination-screen blob plot(s) of the genome before
@@ -865,6 +908,15 @@ Classifies each assembled contig of the final genome against the Kraken2 referen
 as a BlobTools "hits" file that colours the blob plot above and supplies the phylum call used for
 contaminant flagging.
 
+### FCS-GX and FCS-adaptor (--fcs_screen)
+NCBI's own screens, run on the full genome and again on the published FASTA. FCS-GX aligns against a
+large cross-species database and holds it in RAM (~470 GiB). FCS-GX EXCLUDE, or REVIEW with agreement
+from another source, removes an unplaced contig. FCS-adaptor hits are trimmed from contig ends, and a
+hit far from any contig end stops the run. Fungal alignment (minimap2) to --fungal_refs and BLASTn
+add evidence for contigs FCS-GX does not call; Kraken2 alone cannot see taxa absent from PlusPFP, such
+as Rhizopus. GC and coverage are recorded but do not trigger removal. Outputs: <sample>_final.fasta
+and <sample>_full_flagged.fasta. Without this option, the Kraken2 rule below decides removal.
+
 ### Contaminant flagging (--flag_contaminants)
 A contig is removed from the nuclear genome only when it has a non-target phylum call, is unplaced
 by RagTag, and has under --contam_max_ref_aligned (default 0.10) of its length aligned to the
@@ -937,6 +989,7 @@ Citations for each tool, in order of appearance, with project homepages.
 - **BlobTools** -- Laetsch DR, Blaxter ML. BlobTools: Interrogation of genome assemblies. F1000Research. 2017;6:1287. <https://github.com/DRL/blobtools>
 - **Kraken2** -- Wood DE, Lu J, Langmead B. Improved metagenomic analysis with Kraken 2. Genome Biol. 2019;20:257. <https://github.com/DerrickWood/kraken2> (PlusPF prebuilt DB: <https://benlangmead.github.io/aws-indexes/k2>)
 - **Sylph** -- Shaw J, Yu YW. Rapid species-level metagenome profiling and containment estimation with sylph. Nat Biotechnol. 2025;43:1348-1359. <https://github.com/bluenote-1577/sylph>
+- **FCS-GX** -- Astashyn A, et al. Rapid and sensitive detection of genome contamination at scale with FCS-GX. Genome Biol. 2024;25:60. <https://github.com/ncbi/fcs>
 - **BLAST+** -- Camacho C, et al. BLAST+: architecture and applications. BMC Bioinformatics. 2009;10:421. <https://blast.ncbi.nlm.nih.gov>
 TOOLSEOF
     """

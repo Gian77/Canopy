@@ -37,6 +37,7 @@ run_sample() {
         --flag_contaminants true \
         --verify_sylph true \
         --verify_blast true \
+        --fcs_screen true \
         --final_assembly "${FINAL_ASSEMBLY:-medaka}" \
         -resume
     echo "=== Finished ${sample} ==="
