@@ -131,7 +131,8 @@ header (name in the logo colours, description, and the version from `manifest.ve
 
 ```bash
 pip install nf-metro   # needs Python 3.10 or later; the map was drawn with version 2.1.0
-nf-metro render docs/images/canopy_metro.mmd --embed-font -o docs/images/canopy_metro.svg
+nf-metro render docs/images/canopy_metro.mmd --embed-font --font-scale 1.3 --x-spacing 60 \
+  --section-x-gap 30 -o docs/images/canopy_metro.svg
 python3 docs/images/metro_header.py docs/images/canopy_metro.svg nextflow.config
 ```
 
