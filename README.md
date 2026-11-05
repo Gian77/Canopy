@@ -125,11 +125,15 @@ For the full process-level graph of a run, open `dag.html` in its output directo
 
 The map is drawn with [nf-metro](https://github.com/seqeralabs/nf-metro) from
 [`docs/images/canopy_metro.mmd`](docs/images/canopy_metro.mmd). After changing the workflow, update that
-file and render it again:
+file and render it again. nf-metro draws only a one-line title, so a second command adds the Canopy
+header (name in the logo colours, description, and the version from `manifest.version` in
+`nextflow.config`):
 
 ```bash
 pip install nf-metro   # needs Python 3.10 or later; the map was drawn with version 2.1.0
-nf-metro render docs/images/canopy_metro.mmd --embed-font -o docs/images/canopy_metro.svg
+nf-metro render docs/images/canopy_metro.mmd --embed-font --font-scale 1.3 --x-spacing 60 \
+  --section-x-gap 30 -o docs/images/canopy_metro.svg
+python3 docs/images/metro_header.py docs/images/canopy_metro.svg nextflow.config
 ```
 
 ## Key parameters

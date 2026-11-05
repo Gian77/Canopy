@@ -1,11 +1,11 @@
-%%metro title: Canopy
+%%metro title: CANOPY
 %%metro style: seqera
 %%metro file: reads_in | FASTQ
 %%metro file: organelles_out | FASTA
 %%metro file: final_out | FASTA
 %%metro file: zip_out | ZIP
 %%metro line: nuclear | Nuclear genome (default final: Medaka candidate) | #2db572
-%%metro line: purge | Purged candidate (compared, or final with --final_assembly purge) | #17a2a2
+%%metro line: purge | Purged candidate (compared; --final_assembly purge) | #17a2a2
 %%metro line: hapdup | Phasing (--run_hapdup) | #8d99ae | dashed
 %%metro line: cp | Chloroplast | #0570b0
 %%metro line: mt | Mitochondria | #f5a623
@@ -106,7 +106,7 @@ graph LR
         %%metro direction: RL
         %%metro entry: top | nuclear, fcs
         write[Write genomes, trim adaptors]
-        rescreen[FCS re-screen]
+        rescreen[FCS check]
         final_qc[QUAST, BUSCO]
         report[MultiQC + report]
         final_out[ ]

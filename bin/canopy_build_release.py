@@ -6,7 +6,7 @@
   <release>/MANIFEST.sha256          checksums of every file
   <release>/<sample>/genome/         final and flagged nuclear genomes, AGPs, organelles
   <release>/<sample>/evidence/       per-contig decisions, screens, BLAST, Sylph, blob plots
-  <release>/<sample>/qc/             assembly summary (Markdown and HTML), QUAST, BUSCO
+  <release>/<sample>/qc/             assembly summary and pipeline_tools (Markdown and HTML), QUAST, BUSCO
 
 Files come from each run's reports/<sample>/<sample>_assembly.zip, which PACKAGE_RESULTS builds from
 the task outputs. Published copies under assembly/final/ are not used: a run aborted during
@@ -111,7 +111,15 @@ for s in a.samples:
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             with z.open(info) as src, open(dst, "wb") as out:
                 shutil.copyfileobj(src, out)
-    report_to_html(os.path.join(O, "qc", f"{s}_assembly_summary.md"))
+    # In the zip the summary sits next to blobtools/; in the release it is in qc/ and the plots are in
+    # evidence/blobtools/, so point its image links there before rendering (the HTML embeds them).
+    summary = os.path.join(O, "qc", f"{s}_assembly_summary.md")
+    with open(summary, encoding="utf-8") as fh:
+        text = fh.read()
+    with open(summary, "w", encoding="utf-8") as fh:
+        fh.write(text.replace("](blobtools/", "](../evidence/blobtools/"))
+    report_to_html(summary)
+    report_to_html(os.path.join(O, "qc", "pipeline_tools.md"))
 
     for png in glob.glob(os.path.join(R, "qc", "blobtools", s, "blobtax_*.png")):
         os.makedirs(os.path.join(O, "evidence", "blobplots"), exist_ok=True)
