@@ -2,7 +2,8 @@
 """Combine the adapter trims of two writing rounds into one log, and correct the stats to match.
 
 A second round trims a genome that was already trimmed, so its log and stats describe only that
-round. Each output row gives one contig's total trim, its final kept length and its final decision.
+round. Each output row gives one contig's total trim, its final kept length and its final decision:
+the decision table's, or too_short for a sequence the length filter left out of the final FASTA.
 """
 import argparse
 import csv
@@ -12,7 +13,11 @@ ap.add_argument("--prior", required=True, help="trim log of the first round")
 ap.add_argument("--new", required=True, help="trim log of the second round; rewritten in place")
 ap.add_argument("--decisions", required=True, help="final decision table")
 ap.add_argument("--stats", required=True, help="stats of the second round; rewritten in place")
+ap.add_argument("--final", required=True, help="final FASTA of the second round")
 a = ap.parse_args()
+
+with open(a.final) as fh:
+    in_final = {line[1:].split()[0] for line in fh if line.startswith(">")}
 
 
 def rows(path):
@@ -33,14 +38,15 @@ for r in rows(a.prior) + rows(a.new):
         merged[key]["kept_bp"] = r["kept_bp"]
     else:
         merged[key] = dict(r)
-    merged[key]["decision"] = decision[r["sequence"]]
+    d = decision[r["sequence"]]
+    merged[key]["decision"] = "too_short" if d != "remove" and r["sequence"] not in in_final else d
 
 with open(a.new, "w", newline="") as fh:
     w = csv.DictWriter(fh, fields, delimiter="\t", lineterminator="\n")
     w.writeheader()
     w.writerows(merged.values())
 
-kept = [r for r in merged.values() if r["decision"] != "remove"]
+kept = [r for r in merged.values() if r["decision"] not in ("remove", "too_short")]
 updates = {
     "adapter_contig_ends_trimmed": len(kept),
     "adapter_bases_trimmed": sum(int(r["trimmed_start_bp"]) + int(r["trimmed_end_bp"]) for r in kept),

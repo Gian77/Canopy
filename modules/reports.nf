@@ -232,8 +232,11 @@ process FINAL_SUMMARY {
     SCREENED_BP=\$(awk -F'\\t' 'NR==2 {print \$2+\$4+\$5}' "\$RAGTAG" 2>/dev/null || echo 0)
     SCREENED_MB=\$(echo "\$SCREENED_BP" | awk '{printf "%.2f", \$1/1e6}')
     UNPLACED_N=\$(awk -F'\\t' 'NR==2 {print \$3}' "\$RAGTAG" 2>/dev/null || echo 0)
-    # Every screened sequence is either in the final genome or removed.
-    SCREENED_SEQS=\$(awk -v a="\$(ncbi final_sequences)" -v b="\$CONTAM_FLAGGED" 'BEGIN {print a+b}')
+    # Every screened sequence is in the final genome, removed as a contaminant, or left out as too short.
+    SHORT_N=\$(ncbi short_sequences_removed); SHORT_N=\${SHORT_N:-0}
+    SHORT_BP=\$(ncbi short_bases_removed); SHORT_BP=\${SHORT_BP:-0}
+    if [ "\$SHORT_N" = 1 ]; then SHORT_WERE="sequence was"; SHORT_IT="it was"; else SHORT_WERE="sequences were"; SHORT_IT="they were"; fi
+    SCREENED_SEQS=\$(awk -v a="\$(ncbi final_sequences)" -v b="\$CONTAM_FLAGGED" -v c="\$SHORT_N" 'BEGIN {print a+b+c}')
     pct() { awk -v a="\$1" -v b="\$2" 'BEGIN { if (b+0 > 0) printf "%.2f", 100*a/b; else print "NA" }'; }
     # Removed contigs are always unplaced, so take them out of the anchoring percentage.
     if [ "${decontam_ran}" = "true" ]; then
@@ -378,6 +381,10 @@ process FINAL_SUMMARY {
       echo
       echo "Organelle assemblies were built with ${params.organelle_assembler}, filtered against the supplied references and polished with Medaka before evaluation."
       echo
+      if [ -n "\$(ncbi organelle_screen_status)" ]; then
+          echo "> **NCBI screens of \\`${sample}_chloroplast.fasta\\` and \\`${sample}_mitochondria.fasta\\` (status \$(ncbi organelle_screen_status)):** FCS-GX actions \$(ncbi organelle_gx_actions), FCS-adaptor hits \$(ncbi organelle_adaptor_hits). Both were screened together, with the same FCS-GX database as the nuclear genome. Hits are reported, not removed; the reports are \\`${sample}_organelles.fcs_gx_report.txt\\` and \\`${sample}_organelles.fcs_adaptor_report.txt\\` in \\`screening/\\`."
+          echo
+      fi
       echo "### Chloroplast"
       echo
       orgheader "\$QUAST_CP"
@@ -528,10 +535,10 @@ process FINAL_SUMMARY {
           echo "| Published scaffold N50 | \$(echo \$N50_DECONTAM | awk '{printf "%.1f Mb", \$1/1e6}') |"
           echo "| Published BUSCO complete / duplicated | \${BUSCO_C_DECONTAM}% / \${BUSCO_D_DECONTAM}% |"
           if [ "${sylph_ran}" = "true" ]; then
-              echo "| Removed or review contigs matched by Sylph (ANI vs GTDB) | \$SYLPH_CORROBORATED / \$SYLPH_TOTAL |"
+              echo "| Kraken2-rule candidates matched by Sylph (ANI vs GTDB) | \$SYLPH_CORROBORATED / \$SYLPH_TOTAL |"
           fi
           if [ "${blast_ran}" = "true" ]; then
-              echo "| Removed or review contigs passing BLASTn thresholds | \$BLAST_CORROBORATED / \$BLAST_TOTAL |"
+              echo "| Kraken2-rule candidates passing BLASTn thresholds | \$BLAST_CORROBORATED / \$BLAST_TOTAL |"
           fi
           echo
           if [ "${fcs_ran}" = "true" ]; then
@@ -539,6 +546,10 @@ process FINAL_SUMMARY {
               echo
               echo "> [!IMPORTANT]"
               echo "> **Removed: \$CONTAM_FLAGGED of \$SCREENED_SEQS sequences (\$(pct \$CONTAM_FLAGGED \$SCREENED_SEQS)%) and \${CONTAM_MB} of \${SCREENED_MB} Mb (\$(pct \$CONTAM_BASES \$SCREENED_BP)% of bases).** All were unplaced contigs, \$(pct \$CONTAM_FLAGGED \$UNPLACED_N)% of the \$UNPLACED_N unplaced. They are not in \\`${sample}_final.fasta\\` but are kept in the alternate version \\`${sample}_full_flagged.fasta\\`, which holds every sequence with its decision in the header (\\`canopy_decision=keep\\`, \\`review\\` or \\`remove\\`). \\`${sample}_contig_decisions.tsv\\` gives the rule and evidence for each."
+              if [ "\$SHORT_N" != 0 ]; then
+                  echo ">"
+                  echo "> **Too short: \$SHORT_N more \$SHORT_WERE left out (\$SHORT_BP bp)** because \$SHORT_IT under \$(ncbi min_seq_length) bp after adaptor trimming, NCBI's minimum length. Marked \\`rule=min_length_\$(ncbi min_seq_length)bp\\` in \\`${sample}_full_flagged.fasta\\`."
+              fi
               echo
               echo "> **GC and coverage** are recorded for every sequence and support interpretation but do not trigger removal: GC alone would remove real plant contigs, and contaminant coverage overlaps plant coverage."
               echo
@@ -557,7 +568,7 @@ process FINAL_SUMMARY {
           fi
           if [ "${sylph_ran}" = "true" ]; then
               echo
-              echo "> Sylph corroboration: \$SYLPH_CORROBORATED of \$SYLPH_TOTAL removed or review contigs" \
+              echo "> Sylph corroboration: \$SYLPH_CORROBORATED of \$SYLPH_TOTAL contigs the Kraken2 rule marked for removal or review" \
                    "had a confident (>=${params.sylph_min_ani}% adjusted ANI) containment match to a" \
                    "bacterial or archaeal GTDB genome. See \\`${sample}_sylph_corroboration.tsv\\` for per-contig detail." \
                    "GTDB has no fungi, so Sylph cannot confirm fungal contigs." \
@@ -567,7 +578,7 @@ process FINAL_SUMMARY {
           fi
           if [ "${blast_ran}" = "true" ]; then
               echo
-              echo "> BLASTn corroboration: \$BLAST_CORROBORATED of \$BLAST_TOTAL removed or review contigs" \
+              echo "> BLASTn corroboration: \$BLAST_CORROBORATED of \$BLAST_TOTAL contigs the Kraken2 rule marked for removal or review" \
                    "met the configured identity (>=${params.blast_min_identity}%) and query-coverage" \
                    "(>=${params.blast_min_qcov}%) thresholds against the ${blast_source}, with coverage" \
                    "summed across all alignments to the best subject. A 'no' is not disagreement: a contig without a close" \
@@ -614,8 +625,10 @@ process FINAL_SUMMARY {
       else
         HAPLO_SENTENCE="**Haplotig removal:** Purge_dups ran (would remove \${PURGE_REMOVED}%, autotune peak \${PEAK}x) but the Medaka (unpurged) genome was adopted as final -- see the section 4 comparison."
       fi
+      ORG_STATUS_TEXT=""
+      if [ -n "\$(ncbi organelle_screen_status)" ]; then ORG_STATUS_TEXT=" (organelles: \$(ncbi organelle_screen_status))"; fi
       if [ "${fcs_ran}" = "true" ]; then
-        CONTAM_POINT="**Contamination screening:** FCS-GX, Kraken2 confirmed by BLASTn, and alignment to fungal and reference genomes removed \$CONTAM_FLAGGED unplaced contigs (\${CONTAM_MB} Mb, \$(pct \$CONTAM_BASES \$SCREENED_BP)% of the screened bases), and the published genome's NCBI FCS-GX and FCS-adaptor screen status is \$(ncbi screen_status); section 7 gives the rules, the blob plot and the evidence files."
+        CONTAM_POINT="**Contamination screening:** FCS-GX, Kraken2 confirmed by BLASTn, and alignment to fungal and reference genomes removed \$CONTAM_FLAGGED unplaced contigs (\${CONTAM_MB} Mb, \$(pct \$CONTAM_BASES \$SCREENED_BP)% of the screened bases), and the published genome's NCBI FCS-GX and FCS-adaptor screen status is \$(ncbi screen_status)\${ORG_STATUS_TEXT}; section 7 gives the rules, the blob plot and the evidence files."
       elif [ "${decontam_ran}" = "true" ]; then
         CONTAM_POINT="**Contamination screening:** Kraken2 taxonomy, RagTag placement and alignment to the reference removed \$CONTAM_FLAGGED unplaced contigs (\${CONTAM_MB} Mb) into \\`${sample}_removed_contigs.fasta\\`; see section 7."
       elif [ "${taxo_screened}" = "true" ]; then
@@ -772,7 +785,8 @@ ${sample_id}_contig_decisions.tsv   -- decision (keep/review/remove), rule, GC, 
 ${sample_id}_adapter_trims.tsv      -- bases trimmed from each contig end
 screening/                          -- FCS-GX and FCS-adaptor reports, before ('full') and after
                                        ('final') cleaning; 'final2' means a second cleaning round was
-                                       needed. _ncbi_screen.txt holds the outcome
+                                       needed; 'organelles' is the chloroplast and mitochondria
+                                       screened together. _ncbi_screen.txt holds the outcome
 ${sample_id}_sylph_corroboration.tsv, ${sample_id}_blast_corroboration.tsv
                                     -- BLASTn and Sylph checks of candidate contigs. GTDB has no fungi.
 quast_*_report.html                 -- open in a browser; self-contained, no other files needed
@@ -813,6 +827,15 @@ distribution is visible in MultiQC alongside filtered results.
 Filters reads by minimum length (>=1 kb) and minimum mean quality. Removing short, low-quality
 reads reduces assembly fragmentation and lowers the chance of incorporating sequencing errors
 into the draft assembly. The filtered reads are used for all downstream steps.
+
+### Read trimming (--read_trimming; off by default)
+Optional adaptor and barcode removal from the raw reads before Filtlong, with one of three tools.
+Dorado demux trims the adaptors and barcodes of the named kit(s) and keeps every read. Porechop_ABI
+trims the adaptors given in --trim_adapters (or infers them ab initio) and splits reads with a
+middle adaptor. fastplong trims adaptors only; its quality and length filters are off, so Filtlong
+still does all filtering. Adaptor left in the reads ends up at contig ends, where FCS-adaptor finds
+it and it is trimmed from the contigs anyway; on one test genome all three tools removed about 98%
+of that adaptor without improving the assembly.
 
 ---
 
@@ -975,7 +998,8 @@ as a BlobTools "hits" file that colours the blob plot above and supplies the phy
 contaminant flagging.
 
 ### FCS-GX and FCS-adaptor (--fcs_screen)
-NCBI's own screens, run on the full genome and again on the published FASTA. FCS-GX aligns against a
+NCBI's own screens, run on the full genome and again on the published FASTA, and on the
+chloroplast and mitochondria together (reported only; organelle hits are not removed). FCS-GX aligns against a
 large cross-species database and holds it in RAM (~470 GiB). FCS-GX EXCLUDE, or REVIEW with agreement
 from another source, removes an unplaced contig. FCS-adaptor hits are trimmed from contig ends, and a
 hit far from any contig end stops the run. Fungal alignment (minimap2) to --fungal_refs and BLASTn
@@ -1017,9 +1041,9 @@ share one vintage. Source: genome-idx (Langmead prebuilt indexes). The larger NC
 --memory-mapping whose per-k-mer random reads over the shared filesystem never finished.
 
 ### OatkDB (--organelle_assembler oatk)
-HMM profile database of organelle genes for OATK. A sorghum-specific DB is built from the
-provided cp/mt reference FASTAs when available; otherwise the generic embryophyta (land-plant)
-OatkDB is downloaded.
+HMM profile database of organelle genes for OATK: the pre-built embryophyta (land-plant) OatkDB
+(v20230921), downloaded once. HMM profiles built from whole cp/mt reference sequences are too large
+for HMMER, and the land-plant set covers sorghum organelle genes.
 
 ### Reference genomes (--cp_ref / --mt_ref / --nuclear_ref)
 Sorghum bicolor references: chloroplast NC_008602, mitochondrion NC_008360, and nuclear
@@ -1039,6 +1063,9 @@ Citations for each tool, in order of appearance, with project homepages.
 
 - **NanoPlot / NanoPack** -- De Coster W, et al. NanoPack: visualizing and processing long-read sequencing data. Bioinformatics. 2018;34(15):2666-2669. <https://github.com/wdecoster/NanoPlot>
 - **Filtlong** -- Wick RR. Filtlong (no associated publication). <https://github.com/rrwick/Filtlong>
+- **Dorado** (optional) -- Oxford Nanopore Technologies. Dorado (no associated publication). <https://github.com/nanoporetech/dorado>
+- **Porechop_ABI** (optional) -- Bonenfant Q, Noé L, Touzet H. Porechop_ABI: discovering unknown adapters in Oxford Nanopore Technology sequencing reads for downstream trimming. Bioinformatics Advances. 2023;3(1):vbac085. <https://github.com/bonsai-team/Porechop_ABI>
+- **fastplong** (optional) -- Chen S. fastplong (no associated publication). <https://github.com/OpenGene/fastplong>
 - **minimap2** -- Li H. Minimap2: pairwise alignment for nucleotide sequences. Bioinformatics. 2018;34(18):3094-3100. <https://github.com/lh3/minimap2>
 - **SAMtools** -- Danecek P, et al. Twelve years of SAMtools and BCFtools. GigaScience. 2021;10(2):giab008. <https://www.htslib.org>
 - **Flye** -- Kolmogorov M, et al. Assembly of long, error-prone reads using repeat graphs. Nat Biotechnol. 2019;37:540-546. <https://github.com/fenderglass/Flye>
@@ -1056,6 +1083,7 @@ Citations for each tool, in order of appearance, with project homepages.
 - **Kraken2** -- Wood DE, Lu J, Langmead B. Improved metagenomic analysis with Kraken 2. Genome Biol. 2019;20:257. <https://github.com/DerrickWood/kraken2> (PlusPF prebuilt DB: <https://benlangmead.github.io/aws-indexes/k2>)
 - **Sylph** -- Shaw J, Yu YW. Rapid species-level metagenome profiling and containment estimation with sylph. Nat Biotechnol. 2025;43:1348-1359. <https://github.com/bluenote-1577/sylph>
 - **FCS-GX** -- Astashyn A, et al. Rapid and sensitive detection of genome contamination at scale with FCS-GX. Genome Biol. 2024;25:60. <https://github.com/ncbi/fcs>
+- **FCS-adaptor** -- NCBI Foreign Contamination Screen (no associated publication). <https://github.com/ncbi/fcs>
 - **BLAST+** -- Camacho C, et al. BLAST+: architecture and applications. BMC Bioinformatics. 2009;10:421. <https://blast.ncbi.nlm.nih.gov>
 TOOLSEOF
     """

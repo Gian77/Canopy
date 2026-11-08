@@ -33,3 +33,4 @@ databases/
 
 # ---- Python bytecode ----
 __pycache__/
+organelle_fcs/

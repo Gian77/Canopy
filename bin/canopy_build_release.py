@@ -153,6 +153,9 @@ for s in a.samples:
         "fcs_adaptor_hits_final": screen["adaptor_hits"],
         "screen_status": screen["screen_status"],
         "fcs_gx_db_build": screen["gx_db_build"],
+        "organelle_fcs_gx_actions": screen.get("organelle_gx_actions", "not_screened"),
+        "organelle_fcs_adaptor_hits": screen.get("organelle_adaptor_hits", "not_screened"),
+        "organelle_screen_status": screen.get("organelle_screen_status", "not_screened"),
     })
 
 with open(os.path.join(a.release, "summary_all_samples.tsv"), "w", newline="") as fh:

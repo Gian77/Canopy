@@ -9,6 +9,10 @@ in both. Trimming happens at the contig level and the AGP is rebuilt, so scaffol
 100 bp and contig interiors are untouched. A hit far from any contig end stops the run, because
 it could mark a chimeric join that trimming would not fix.
 
+Sequences shorter than --min-length after trimming are left out of the final genome, because NCBI
+does not accept sequences under 200 bp. They stay in the flagged genome as
+canopy_decision=remove;rule=min_length_<N>bp, and their trims are logged with decision too_short.
+
 '+' in sequence IDs becomes 'plus' because NCBI and FCS do not accept it.
 """
 import argparse
@@ -21,6 +25,7 @@ ap.add_argument("--agp", required=True)
 ap.add_argument("--decisions", required=True)
 ap.add_argument("--adaptor-report", required=True)
 ap.add_argument("--max-end-dist", type=int, default=1000)
+ap.add_argument("--min-length", type=int, default=0, help="shortest sequence kept in the final genome")
 a = ap.parse_args()
 
 
@@ -84,7 +89,7 @@ with open(a.decisions) as fh:
 if set(decisions) != set(seqs):
     raise SystemExit("ERROR: decision table and FASTA describe different sequences")
 
-new_seq, new_agp, final_lengths = {}, {}, []
+new_seq, new_agp, contig_lengths = {}, {}, {}
 trim_log = []
 
 for obj, rows in agp.items():
@@ -137,13 +142,16 @@ for obj, rows in agp.items():
                          str(beg), str(end), r[8]])
         pos += kept
         part += 1
-        if decisions[obj]["decision"] != "remove":
-            final_lengths.append(kept)
+        contig_lengths.setdefault(obj, []).append(kept)
     if out_rows:
         new_seq[obj] = "".join(parts)
         new_agp[obj] = out_rows
         if len(new_seq[obj]) != pos - 1:
             raise SystemExit(f"ERROR: rebuilt {obj} has inconsistent length")
+
+too_short = {o for o in new_seq if decisions[o]["decision"] != "remove" and len(new_seq[o]) < a.min_length}
+final_objs = [o for o in new_seq if decisions[o]["decision"] != "remove" and o not in too_short]
+trim_log = [row[:6] + ("too_short",) if row[1] in {safe(o) for o in too_short} else row for row in trim_log]
 
 agp_header = "##agp-version 2.1\n"
 with open(f"{a.sample}_final.fasta", "w") as ff, open(f"{a.sample}_full_flagged.fasta", "w") as fl, \
@@ -155,9 +163,12 @@ with open(f"{a.sample}_final.fasta", "w") as ff, open(f"{a.sample}_full_flagged.
         lines = "".join("\t".join(r) + "\n" for r in new_agp[obj])
         al.write(lines)
         taxon = (d["fcs_top_tax"] or d["fungal_species"] or d["phylum"]).split(";")[0].replace(" ", "_")
-        write_record(fl, f"{safe(obj)} canopy_decision={d['decision']};rule={d['rule'] or 'none'};"
+        decision, rule = d["decision"], d["rule"] or "none"
+        if obj in too_short:
+            decision, rule = "remove", f"min_length_{a.min_length}bp"
+        write_record(fl, f"{safe(obj)} canopy_decision={decision};rule={rule};"
                          f"evidence_taxon={taxon or 'none'}", new_seq[obj])
-        if d["decision"] != "remove":
+        if obj in final_objs:
             af.write(lines)
             write_record(ff, safe(obj), new_seq[obj])
 
@@ -166,8 +177,8 @@ with open(f"{a.sample}_adapter_trims.tsv", "w") as t:
     for row in trim_log:
         t.write("\t".join(map(str, row)) + "\n")
 
-final_objs = [o for o in new_seq if decisions[o]["decision"] != "remove"]
-trimmed_final = [x for x in trim_log if x[6] != "remove"]
+final_lengths = [x for o in final_objs for x in contig_lengths[o]]
+trimmed_final = [x for x in trim_log if x[6] not in ("remove", "too_short")]
 with open(f"{a.sample}_final_stats.txt", "w") as s:
     s.write(f"final_sequences={len(final_objs)}\n")
     s.write(f"final_bases={sum(len(new_seq[o]) for o in final_objs)}\n")
@@ -175,3 +186,6 @@ with open(f"{a.sample}_final_stats.txt", "w") as s:
     s.write(f"final_contig_n50={n50(final_lengths)}\n")
     s.write(f"adapter_contig_ends_trimmed={len(trimmed_final)}\n")
     s.write(f"adapter_bases_trimmed={sum(x[3] + x[4] for x in trimmed_final)}\n")
+    s.write(f"min_seq_length={a.min_length}\n")
+    s.write(f"short_sequences_removed={len(too_short)}\n")
+    s.write(f"short_bases_removed={sum(len(new_seq[o]) for o in too_short)}\n")

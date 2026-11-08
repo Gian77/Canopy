@@ -4,6 +4,7 @@
 %%metro file: organelles_out | FASTA
 %%metro file: final_out | FASTA
 %%metro file: zip_out | ZIP
+%%metro line: trim | Read trimming (--read_trimming) | #6c757d | dashed
 %%metro line: nuclear | Nuclear genome (default final: Medaka candidate) | #2db572
 %%metro line: purge | Purged candidate (compared; --final_assembly purge) | #17a2a2
 %%metro line: hapdup | Phasing (--run_hapdup) | #8d99ae | dashed
@@ -27,12 +28,15 @@ graph LR
         %%metro exit: bottom | oatk
         reads_in[ ]
         nanoplot[NanoPlot]
+        trim[Dorado, Porechop_ABI or fastplong]
         filtlong[Filtlong]
         map_org[minimap2]
         partition[samtools]
 
         reads_in -->|nuclear,purge,hapdup,cp,mt,oatk| nanoplot
         nanoplot -->|nuclear,purge,hapdup,cp,mt,oatk| filtlong
+        reads_in -->|trim| trim
+        trim -->|trim| filtlong
         filtlong -->|nuclear,purge,hapdup,cp,mt| map_org
         map_org -->|nuclear,purge,hapdup,cp,mt| partition
     end
@@ -58,6 +62,7 @@ graph LR
 
     subgraph organelles [Organelle assembly]
         %%metro number: 2
+        %%metro direction: RL
         %%metro entry: top | cp, mt, oatk
         dedup[seqkit]
         flye_org[Flye]
@@ -65,6 +70,7 @@ graph LR
         filter_org[Reference filter]
         medaka_org[Medaka]
         quast_org[QUAST]
+        fcs_org[FCS check]
         organelles_out[ ]
 
         dedup -->|cp,mt| flye_org
@@ -72,7 +78,8 @@ graph LR
         oatk_asm -->|oatk| filter_org
         filter_org -->|cp,mt,oatk| medaka_org
         medaka_org -->|cp,mt,oatk| quast_org
-        quast_org -->|cp,mt,oatk| organelles_out
+        quast_org -->|cp,mt,oatk| fcs_org
+        fcs_org -->|cp,mt,oatk| organelles_out
     end
 
     subgraph screening [Contaminant evidence]

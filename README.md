@@ -49,7 +49,8 @@ For each sample, with the settings the launcher scripts use:
 
 1. **Read QC:** NanoPlot on the raw reads.
 2. **Read filtering:** Filtlong keeps reads of at least 1 kb with a mean quality of at least 80
-   (Filtlong's own 0–100 score, not Phred).
+   (Filtlong's own 0–100 score, not Phred). With `--read_trimming`, adaptors are first removed from the
+   raw reads by Dorado, Porechop_ABI or fastplong; see [Read trimming](#read-trimming-optional).
 3. **Organelle mapping:** minimap2 (`map-ont`) against the combined chloroplast and mitochondrial
    references.
 4. **Read partitioning:** samtools splits reads into chloroplast and mitochondrial sets (primary
@@ -65,7 +66,8 @@ For each sample, with the settings the launcher scripts use:
    their length at more than 70% identity. This removes nuclear copies of organelle sequence
    (NUPTs and NUMTs). Turn it off with `--filter_organelles false`.
 7. **Polishing and QC:** Medaka with the deduplicated organelle reads, then QUAST against the organelle
-   reference.
+   reference. With `--fcs_screen`, the polished organelles are also screened with FCS-GX and
+   FCS-adaptor (step 21).
 
 **Nuclear assembly**
 
@@ -98,9 +100,12 @@ For each sample, with the settings the launcher scripts use:
 19. **Decision rule:** `bin/canopy_contig_rule.py` combines the evidence for every contig, as described
     in [How contigs are kept or removed](#how-contigs-are-kept-or-removed).
 20. **Final genomes:** `bin/canopy_write_genomes.py` writes `<sample>_final.fasta` and
-    `<sample>_full_flagged.fasta` with their AGPs, trimming adaptor hits from contig ends.
+    `<sample>_full_flagged.fasta` with their AGPs, trimming adaptor hits from contig ends. Sequences
+    shorter than `--min_seq_len` (200 bp, NCBI's minimum) after trimming are left out of the final genome.
 21. **Re-screening:** FCS-GX and FCS-adaptor run again on the final genome. A genome with hits gets one
-    more round (`final2`). Hits left after that give `screen_status=CHECK`.
+    more round (`final2`). Hits left after that give `screen_status=CHECK`. The chloroplast and
+    mitochondria are screened too, together in one run (`organelles`). Their hits are reported, not
+    removed, as `organelle_screen_status`.
 22. **Reports:** MultiQC, a per-sample assembly summary, a tools report, and one zip archive per sample
     that holds the genomes and their evidence.
 
@@ -113,8 +118,13 @@ For each sample, with the settings the launcher scripts use:
 Each line follows one kind of data through the stations that process it, and dashed lines are optional.
 The map simplifies some details:
 
+- Read trimming (dashed grey) runs only with `--read_trimming`, using one of the three tools on its
+  station. It then replaces the raw reads as Filtlong's input, so with trimming on, every line passes
+  through it.
 - Oatk takes all filtered reads, but the mapping, partitioning and seqkit stations still run in Oatk
   mode because Medaka polishes the organelles with those reads.
+- The FCS check at the end of section 2 runs only with `--fcs_screen`: FCS-GX and FCS-adaptor screen the
+  chloroplast and mitochondria together, and hits are reported, not removed.
 - QUAST and BUSCO in section 5 score every nuclear candidate, not only the final genome.
 - RagTag and the sections after it depend on `--nuclear_ref`. Without a reference, the candidates are
   the unscaffolded genomes, and the summary and archive are not produced.
@@ -131,7 +141,7 @@ header (name in the logo colours, description, and the version from `manifest.ve
 
 ```bash
 pip install nf-metro   # needs Python 3.10 or later; the map was drawn with version 2.1.0
-nf-metro render docs/images/canopy_metro.mmd --embed-font --font-scale 1.3 --x-spacing 60 \
+nf-metro render docs/images/canopy_metro.mmd --embed-font --font-scale 1.3 --x-spacing 70 \
   --section-x-gap 30 -o docs/images/canopy_metro.svg
 python3 docs/images/metro_header.py docs/images/canopy_metro.svg nextflow.config
 ```
@@ -148,6 +158,33 @@ python3 docs/images/metro_header.py docs/images/canopy_metro.svg nextflow.config
 | `--nuclear_ref` | none | Nuclear reference FASTA. Enables RagTag, QUAST genome fraction, the summary and the archive |
 | `--outdir` | `results` | Output directory |
 | `--help` | `false` | Print the usage message and exit |
+
+### Read trimming (optional)
+
+Off by default. Filtlong does not trim adaptors: it only drops whole reads. Without read trimming, ONT
+adaptor left in the reads ends up at contig ends, where FCS-adaptor finds it and
+`canopy_write_genomes.py` trims it (step 20), so the final genome passes NCBI's screen either way.
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `--read_trimming` | `none` | `none`, `dorado`, `porechop_abi` or `fastplong`. Runs on the raw reads, before Filtlong |
+| `--dorado_kit` | none | Needed for `dorado`. One kit (`SQK-NBD114-24`), or `barcodeNN=KIT` entries plus one bare kit for the rest when a FASTQ mixes runs of different kits: `barcode18=SQK-NBD114-24,SQK-RBK114-24` (matched on the `barcode=` tag in read headers) |
+| `--trim_adapters` | none | FASTA for `porechop_abi` and `fastplong`, records named `<set>_start` and `<set>_end` for the sequence at read starts and read ends. Give the full adaptor + barcode sequences of your kits |
+
+- **dorado:** `dorado demux` with each run's kit, which trims adaptors and barcodes. Unclassified reads are
+  kept, so no reads are lost. It doesn't split chimeric reads; Dorado does that during basecalling.
+- **porechop_abi:** trims read ends and splits reads at internal adaptors. Without `--trim_adapters` it
+  infers adaptors ab initio, which on Rapid-kit reads found only part of the adaptor and left it on most
+  reads, so give the sequences.
+- **fastplong:** adaptor trimming only (`-Q -L`; Filtlong still filters). Without `--trim_adapters` it
+  detects one adaptor per file and misses a second kit.
+
+**Tested on BTx2932 (November 2026):** all three removed about 98% of the adaptor reaching the assembly
+(2,070 FCS-adaptor ranges down to 26–42), but none improved it. Compared with an untrimmed rerun, contig N50
+was equal or about 1 kb lower, genome fraction 0.2–0.8 points lower and BUSCO 0.1 points lower, because
+trimming removes about 4% of the read bases and there were almost no chimeric reads to split (431–816 of
+3.85 million). Dorado was closest to the untrimmed result. Trimming is worth trying on data with more
+chimeric reads or more coverage to spare.
 
 ### Assembly and polishing
 
@@ -195,6 +232,7 @@ python3 docs/images/metro_header.py docs/images/canopy_metro.svg nextflow.config
 | `--fcs_adaptor_image` | `ncbi/fcs-adaptor:0.5.5` | FCS-adaptor container image |
 | `--fungal_refs` | `databases/fungal_refs/fungi.fasta` | Fungal reference FASTA, with IDs prefixed `<species>\|`. Not downloaded |
 | `--contam_min_fungal_frac` | `0.5` | Minimum fraction of a contig aligned to a fungal reference |
+| `--min_seq_len` | `200` | Shortest sequence kept in `<sample>_final.fasta`, after adaptor trimming. Shorter ones stay in `<sample>_full_flagged.fasta` as `rule=min_length_<N>bp`. `0` turns it off |
 
 > `--skip_purge` and `--blast_remote` are retired, and setting either stops the run. BLASTn only searches
 > a local database, so assembly sequence is never sent to a remote service.
@@ -406,7 +444,7 @@ one genome, in a small download. With `--fcs_screen`:
 | `<sample>_contig_decisions.tsv` | Decision, rule and evidence for each contig |
 | `<sample>_adapter_trims.tsv` | Adaptor trims applied |
 | `<sample>_blast_corroboration.tsv`, `<sample>_sylph_corroboration.tsv` | Independent check results |
-| `screening/` | FCS-GX and FCS-adaptor reports for the full and final genomes, and `<sample>_ncbi_screen.txt` |
+| `screening/` | FCS-GX and FCS-adaptor reports for the full and final genomes and the organelles, and `<sample>_ncbi_screen.txt` |
 | `blobtools/` | Blob plots, table and coverage |
 | `quast_*_report.html`, `busco_nuclear_final_summary.txt` | Assembly QC |
 | `pipeline_tools.md` | Tools report |
@@ -422,6 +460,7 @@ The results directory also holds:
 | `polishing/` | Medaka, purge_dups and HapDup output |
 | `qc/` | NanoPlot, read-set statistics, QUAST, BUSCO, Qualimap, Kraken2, BlobTools, contamination evidence |
 | `reads_filtered/`, `reads_partitioned/` | Filtered and partitioned reads |
+| `reads_trimmed/` | With `--read_trimming`: the trimming tool's log (and fastplong's JSON and HTML report) |
 | `mapping/` | Organelle mapping statistics |
 | `multiqc/` | MultiQC report |
 | `pipeline_report.html`, `timeline.html`, `trace.txt`, `dag.html` | Nextflow execution records |
@@ -467,7 +506,9 @@ join that trimming would not fix. `+` in sequence names becomes `plus`, because 
 it.
 
 `screen_status=PASS` in the report means the last FCS-GX and FCS-adaptor screens of the final genome have no
-hits. It is not a complete NCBI submission check: see [Known limitations](#known-limitations).
+hits. `organelle_screen_status` is the same for the chloroplast and mitochondria, screened together; organelle
+hits are only reported, so a `CHECK` there needs handling by hand. Neither is a complete NCBI submission check:
+see [Known limitations](#known-limitations).
 
 ## Using Canopy on another species
 
@@ -579,7 +620,11 @@ versions. Canopy pulls the images itself, so you only need this section when cha
 
 **Verify an image on the cluster nodes before changing a tag.** An image can exist and still fail: for example,
 `quay.io/biocontainers/flye:2.9.6--py313h7fbb527_1` dies with `SIGILL` (illegal CPU instruction) on our compute
-nodes, so Canopy uses `flye:2.9.4--py310h2b6aa90_0`.
+nodes, so Canopy uses `flye:2.9.4--py310h2b6aa90_0`. Likewise every `porechop_abi:0.5.1` build SIGILLs on
+`scarcity-8` (no AVX2), so Canopy uses `porechop_abi:0.5.0post1--py310h275bdba_0`.
+
+Dorado is the one image not from BioContainers: `ontresearch/dorado` on Docker Hub, pinned by its commit tag.
+It is about 9 GB, so the first run with `--read_trimming dorado` spends a while pulling it.
 
 ### Find and verify a single-tool image
 
@@ -616,12 +661,10 @@ grep -E "^minimap2=.*samtools=|^samtools=.*minimap2=" hash.tsv
 
 - **Organelle filter options:** `--organelle_min_qcov` and `--organelle_min_ident` are accepted but have no effect.
   The filter uses fixed thresholds of 0.5 and 0.7.
-- **Not yet an automatic NCBI pass:** sequences under 200 bp are not removed, and organelle assemblies are not
-  screened with FCS. Handle both before submission.
+- **Organelle screen hits are not removed:** with `--fcs_screen` the organelles are screened, but any hit only
+  sets `organelle_screen_status=CHECK`. Trim or remove it by hand before submission.
 - **R5 and BLASTn:** the docstring in `bin/canopy_contig_rule.py` describes a non-plant hit, but corroboration checks
   identity and coverage only, not the taxon of the hit. Review `R5_blast` removals in `<sample>_contig_decisions.tsv`.
-- **Report section 7:** the Sylph and BLASTn totals count Kraken-rule candidates only, so contigs removed by FCS-GX
-  alone are not included.
 - **Report gaps:** `pipeline_tools.md` does not list tool versions, and read figures in the report are for the raw read
   set rather than the nuclear reads.
 - **Reference-guided scaffolds:** RagTag order and orientation follow the reference, so they cannot reveal real
@@ -668,6 +711,9 @@ Please cite the tools you use. Versions are the ones pinned in `modules/` and us
 |---|---|---|
 | NanoPlot | 1.43.0 | De Coster W, Rademakers R. NanoPack2: population-scale evaluation of long-read sequencing data. *Bioinformatics* 2023;39:btad311. [doi:10.1093/bioinformatics/btad311](https://doi.org/10.1093/bioinformatics/btad311) |
 | Filtlong | 0.2.1 | Wick R. <https://github.com/rrwick/Filtlong> |
+| Dorado (optional) | 2.1.1 | Oxford Nanopore Technologies. <https://github.com/nanoporetech/dorado> |
+| Porechop_ABI (optional) | 0.5.0post1 | Bonenfant Q, Noé L, Touzet H. Porechop_ABI: discovering unknown adapters in Oxford Nanopore Technology sequencing reads for downstream trimming. *Bioinformatics Advances* 2023;3:vbac085. [doi:10.1093/bioadv/vbac085](https://doi.org/10.1093/bioadv/vbac085) |
+| fastplong (optional) | 0.7.0 | Chen S. <https://github.com/OpenGene/fastplong> |
 | minimap2 | 2.30 (2.31 for HapDup) | Li H. Minimap2: pairwise alignment for nucleotide sequences. *Bioinformatics* 2018;34:3094–3100. [doi:10.1093/bioinformatics/bty191](https://doi.org/10.1093/bioinformatics/bty191). Li H. New strategies to improve minimap2 alignment accuracy. *Bioinformatics* 2021;37:4572–4574. [doi:10.1093/bioinformatics/btab705](https://doi.org/10.1093/bioinformatics/btab705) |
 | SAMtools | 1.21 (1.6 for HapDup) | Danecek P, et al. Twelve years of SAMtools and BCFtools. *GigaScience* 2021;10:giab008. [doi:10.1093/gigascience/giab008](https://doi.org/10.1093/gigascience/giab008) |
 | SeqKit | 2.13.0 | Shen W, et al. SeqKit: a cross-platform and ultrafast toolkit for FASTA/Q file manipulation. *PLoS ONE* 2016;11:e0163962. [doi:10.1371/journal.pone.0163962](https://doi.org/10.1371/journal.pone.0163962). Shen W, et al. SeqKit2: a Swiss army knife for sequence and alignment processing. *iMeta* 2024;3:e191. [doi:10.1002/imt2.191](https://doi.org/10.1002/imt2.191) |

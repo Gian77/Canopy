@@ -40,6 +40,13 @@ def helpMessage() {
       --cp_ref [path]               Chloroplast reference FASTA
       --mt_ref [path]               Mitochondrion reference FASTA
 
+    Read trimming (optional, before Filtlong):
+      --read_trimming [str]         none | dorado | porechop_abi | fastplong        [default: none]
+      --dorado_kit [str]            Kit for dorado: KIT, or barcodeNN=KIT,...,KIT  [default: none]
+                                    for files that mix runs of different kits
+      --trim_adapters [path]        Adaptor FASTA (<set>_start / <set>_end records) [default: none]
+                                    for porechop_abi and fastplong
+
     Organelle assembly options:
       --organelle_assembler [str]   Organelle assembler: 'flye' or 'oatk'           [default: flye]
                                     'oatk' uses the embryophyta OatkDB (v20230921).
@@ -64,8 +71,10 @@ def helpMessage() {
       --verify_sylph [bool]         Advisory check of removed and review contigs    [default: false]
       --verify_blast [bool]         Advisory check against local --blast_db         [default: false]
       --fcs_screen [bool]           FCS-GX/FCS-adaptor screening, evidence-based    [default: false]
-                                    removal, and final + flagged genome versions
+                                    removal, and final + flagged genome versions;
+                                    also screens the organelles (report only)
                                     (needs --flag_contaminants and --verify_blast)
+      --min_seq_len [int]           Shortest sequence in the final genome (NCBI)    [default: 200]
 
     General options:
       --outdir [path]               Output directory                                [default: results]
@@ -81,13 +90,14 @@ def helpMessage() {
 
 // QC: read stats, filtering, BUSCO completeness, MultiQC aggregation
 include {NANOPLOT; FILTER_READS; FILTER_ORGANELLE_CONTIGS; BUSCO_NUCLEAR; MULTIQC; BANDAGE_IMAGE; QUAST_ORGANELLE; QUAST_NUCLEAR; ALIGN_FOR_QC; SORT_FOR_QC; FILTER_PRIMARY_BAM; QUALIMAP_BAMQC; BLOBTOOLS_COVERAGE} from './modules/qc.nf'
+include {TRIM_READS_DORADO; TRIM_READS_PORECHOP; TRIM_READS_FASTPLONG} from './modules/trimming.nf'
 include {FETCH_OATKDB; FETCH_KRAKEN2_PLUSPFP; FETCH_SYLPH_GTDB} from './modules/dbs.nf'
 include {ALIGN_TO_ORGANELLES; SORT_INDEX_BAM; EXTRACT_RAW_READSETS; DEDUP_ORGANELLE_READS; READSET_STATS} from './modules/mapping.nf'
 include {ASSEMBLE_CP_FLYE; ASSEMBLE_MT_FLYE; ASSEMBLE_ORGANELLES_OATK; ASSEMBLE_NUCLEAR} from './modules/assembly.nf'
 include {POLISH_MEDAKA; POLISH_MEDAKA_ORGANELLE; PURGE_DUPS; ALIGN_FOR_HAPDUP; SORT_FOR_HAPDUP; HAPDUP} from './modules/polishing.nf'
 include {RAGTAG_SCAFFOLD; RAGTAG_SCAFFOLD as RAGTAG_PREPURGE} from './modules/scaffolding.nf'
-include {KRAKEN2_CLASSIFY; BLOBTOOLS_TAXONOMY; ALIGN_UNPLACED_TO_REFERENCE; CLASSIFY_CONTAMINANTS; REMOVE_CONTAMINANTS; EXTRACT_CANDIDATE_CONTIGS; SYLPH_VERIFY_CONTAMINANTS; BLAST_VERIFY_CONTAMINANTS; ALIGN_UNPLACED_TO_FUNGI; APPLY_CONTAMINANT_RULE; WRITE_GENOME_VERSIONS; REFINE_GENOME_VERSIONS; NCBI_SCREEN_SUMMARY} from './modules/contamination.nf'
-include {FCS_GX_SCREEN as FCS_GX_FULL; FCS_GX_SCREEN as FCS_GX_FINAL; FCS_ADAPTOR_SCREEN as FCS_ADAPTOR_FULL; FCS_ADAPTOR_SCREEN as FCS_ADAPTOR_FINAL; FCS_GX_SCREEN as FCS_GX_FINAL2; FCS_ADAPTOR_SCREEN as FCS_ADAPTOR_FINAL2} from './modules/contamination.nf'
+include {KRAKEN2_CLASSIFY; BLOBTOOLS_TAXONOMY; ALIGN_UNPLACED_TO_REFERENCE; CLASSIFY_CONTAMINANTS; REMOVE_CONTAMINANTS; EXTRACT_CANDIDATE_CONTIGS; SYLPH_VERIFY_CONTAMINANTS; BLAST_VERIFY_CONTAMINANTS; ALIGN_UNPLACED_TO_FUNGI; APPLY_CONTAMINANT_RULE; WRITE_GENOME_VERSIONS; REFINE_GENOME_VERSIONS; NCBI_SCREEN_SUMMARY; COMBINE_ORGANELLES} from './modules/contamination.nf'
+include {FCS_GX_SCREEN as FCS_GX_FULL; FCS_GX_SCREEN as FCS_GX_FINAL; FCS_ADAPTOR_SCREEN as FCS_ADAPTOR_FULL; FCS_ADAPTOR_SCREEN as FCS_ADAPTOR_FINAL; FCS_GX_SCREEN as FCS_GX_FINAL2; FCS_ADAPTOR_SCREEN as FCS_ADAPTOR_FINAL2; FCS_GX_SCREEN as FCS_GX_ORGANELLES; FCS_ADAPTOR_SCREEN as FCS_ADAPTOR_ORGANELLES} from './modules/contamination.nf'
 include {FINAL_SUMMARY; TOOLS_REPORT; PACKAGE_RESULTS} from './modules/reports.nf'
 
 // ============================================================
@@ -137,6 +147,13 @@ workflow {
     if (params.fcs_screen && !(params.flag_contaminants && params.verify_blast)) {
         exit 1, "ERROR: --fcs_screen requires --flag_contaminants and --verify_blast (the removal " +
                 "rule combines their evidence with FCS-GX). Enable both, or drop --fcs_screen."
+    }
+    if (!(params.read_trimming in ['none', 'dorado', 'porechop_abi', 'fastplong'])) {
+        exit 1, "ERROR: --read_trimming must be none, dorado, porechop_abi or fastplong (got '${params.read_trimming}')"
+    }
+    if (params.read_trimming == 'dorado' && !params.dorado_kit) {
+        exit 1, "ERROR: --read_trimming dorado needs --dorado_kit (e.g. SQK-NBD114-24, or " +
+                "barcode18=SQK-NBD114-24,SQK-RBK114-24 for a file that mixes kits)."
     }
     if (params.containsKey('blast_remote')) {
         exit 1, "ERROR: --blast_remote is no longer supported. BLASTn only searches a local " +
@@ -188,7 +205,19 @@ workflow {
 
    // 1. QC + filtering
     NANOPLOT(raw_reads_ch)
-    FILTER_READS(raw_reads_ch)
+
+    // Optional adaptor trimming before Filtlong. With 'none' the raw reads go to Filtlong unchanged.
+    def adapters_ch = Channel.value(file(params.trim_adapters ?: "${projectDir}/assets/NO_ADAPTERS", checkIfExists: true))
+    if (params.read_trimming == 'dorado') {
+        reads_for_filter_ch = TRIM_READS_DORADO(raw_reads_ch).reads
+    } else if (params.read_trimming == 'porechop_abi') {
+        reads_for_filter_ch = TRIM_READS_PORECHOP(raw_reads_ch, adapters_ch).reads
+    } else if (params.read_trimming == 'fastplong') {
+        reads_for_filter_ch = TRIM_READS_FASTPLONG(raw_reads_ch, adapters_ch).reads
+    } else {
+        reads_for_filter_ch = raw_reads_ch
+    }
+    FILTER_READS(reads_for_filter_ch)
 
     // 2a. Align filtered reads to combined cp+mt reference (minimap2)
     ALIGN_TO_ORGANELLES(FILTER_READS.out.reads, cp_ref_ch, mt_ref_ch)
@@ -502,11 +531,22 @@ workflow {
                         .mix(FCS_GX_FINAL2.out.report.map { id, stage, f -> tuple(id, f) })
                     last_adaptor_ch = screened_ch.clean.map { id, stats, gx, adaptor -> tuple(id, adaptor) }
                         .mix(FCS_ADAPTOR_FINAL2.out.report.map { id, stage, f -> tuple(id, f) })
+
+                    // The published chloroplast and mitochondria, screened together (one FCS-GX run).
+                    // Reported only: organelle hits are left for inspection, not removed.
+                    COMBINE_ORGANELLES(cp_final.join(mt_final))
+                    FCS_GX_ORGANELLES(COMBINE_ORGANELLES.out.assembly, gx_db_ch)
+                    FCS_ADAPTOR_ORGANELLES(COMBINE_ORGANELLES.out.assembly)
+                    organelle_gx_ch      = FCS_GX_ORGANELLES.out.report.map { id, stage, f -> tuple(id, f) }
+                    organelle_adaptor_ch = FCS_ADAPTOR_ORGANELLES.out.report.map { id, stage, f -> tuple(id, f) }
+
                     NCBI_SCREEN_SUMMARY(
                         screened_ch.clean.map { id, stats, gx, adaptor -> tuple(id, stats) }
                             .mix(REFINE_GENOME_VERSIONS.out.stats)
                             .join(last_gx_ch)
                             .join(last_adaptor_ch)
+                            .join(organelle_gx_ch)
+                            .join(organelle_adaptor_ch)
                     )
                 } else {
                     REMOVE_CONTAMINANTS(nuclear_final.join(CLASSIFY_CONTAMINANTS.out.ids))
@@ -663,6 +703,8 @@ workflow {
                 .join(last_gx_ch)
                 .join(FCS_ADAPTOR_FULL.out.report.map { id, stage, f -> tuple(id, f) })
                 .join(last_adaptor_ch)
+                .join(organelle_gx_ch)
+                .join(organelle_adaptor_ch)
                 .join(NCBI_SCREEN_SUMMARY.out.summary)
                 .map { row -> tuple(row[0], row[1..-1]) }
             : Channel.empty()

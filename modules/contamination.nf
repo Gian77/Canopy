@@ -660,7 +660,7 @@ process WRITE_GENOME_VERSIONS {
     script:
     """
     python3 ${writer_script} --sample ${sample_id} --fasta ${assembly} --agp ${agp} \\
-        --decisions ${decisions} --adaptor-report ${adaptor_report}
+        --decisions ${decisions} --adaptor-report ${adaptor_report} --min-length ${params.min_seq_len}
     """
 }
 
@@ -706,15 +706,36 @@ process REFINE_GENOME_VERSIONS {
     awk -F '\\t' -v OFS='\\t' 'NR > 1 { gsub(/\\+/, "plus", \$1) } { print }' \\
         ${sample_id}_contig_decisions.tsv > decisions_safe_ids.tsv
     python3 ${writer_script} --sample ${sample_id} --fasta ${flagged} --agp ${flagged_agp} \\
-        --decisions decisions_safe_ids.tsv --adaptor-report ${adaptor_final}
+        --decisions decisions_safe_ids.tsv --adaptor-report ${adaptor_final} --min-length ${params.min_seq_len}
     python3 ${merge_script} --prior ${prior_trims} --new ${sample_id}_adapter_trims.tsv \\
-        --decisions ${sample_id}_contig_decisions.tsv --stats ${sample_id}_final_stats.txt
+        --decisions ${sample_id}_contig_decisions.tsv --stats ${sample_id}_final_stats.txt \\
+        --final ${sample_id}_final.fasta
     rm -f gx_both_rounds.txt decisions_safe_ids.tsv
     """
 }
 
+// The chloroplast and mitochondria in one FASTA, so one FCS-GX run (one ~470 GiB database load)
+// screens both. IDs get a chloroplast_ / mitochondria_ prefix so hits can be traced back.
+process COMBINE_ORGANELLES {
+    tag        { sample_id }
+    label      'qc_light'
+    container  'quay.io/biocontainers/seqkit:2.13.0--he881be0_0'
+
+    input:
+    tuple val(sample_id), path(cp, stageAs: 'cp.fasta'), path(mt, stageAs: 'mt.fasta')
+
+    output:
+    tuple val(sample_id), val('organelles'), path("${sample_id}_organelles.fasta"), emit: assembly
+
+    script:
+    """
+    { sed '/^>/ s/^>/>chloroplast_/' cp.fasta; sed '/^>/ s/^>/>mitochondria_/' mt.fasta; } > ${sample_id}_organelles.fasta
+    """
+}
+
 // Screens of the published FASTA, as one key=value file for the report. Hits are reported rather
-// than failing the run, so the evidence is published for inspection.
+// than failing the run, so the evidence is published for inspection. The organelle screens are
+// reported separately (organelle_*) and do not change screen_status, which is the nuclear genome's.
 process NCBI_SCREEN_SUMMARY {
     tag        { sample_id }
     label      'qc_light'
@@ -722,7 +743,7 @@ process NCBI_SCREEN_SUMMARY {
     container  'quay.io/biocontainers/seqkit:2.13.0--he881be0_0'
 
     input:
-    tuple val(sample_id), path(stats), path(gx_report), path(adaptor_report)
+    tuple val(sample_id), path(stats), path(gx_report), path(adaptor_report), path(org_gx_report), path(org_adaptor_report)
 
     output:
     tuple val(sample_id), path("${sample_id}_ncbi_screen.txt"), emit: summary
@@ -735,6 +756,10 @@ process NCBI_SCREEN_SUMMARY {
     db=\$(head -1 ${gx_report} | grep -o '"build-date": "[0-9-]*"' | grep -o '[0-9][0-9-]*' | head -1)
     status=PASS
     if [ "\$gx_exclude" != 0 ] || [ "\$gx_other" != 0 ] || [ "\$adaptor" != 0 ]; then status=CHECK; fi
+    org_gx=\$(awk -F '\\t' '!/^#/ && NF' ${org_gx_report} | wc -l)
+    org_adaptor=\$(awk '!/^#/ && NF' ${org_adaptor_report} | wc -l)
+    org_status=PASS
+    if [ "\$org_gx" != 0 ] || [ "\$org_adaptor" != 0 ]; then org_status=CHECK; fi
     {
         cat ${stats}
         echo "gx_exclude=\$gx_exclude"
@@ -742,6 +767,9 @@ process NCBI_SCREEN_SUMMARY {
         echo "adaptor_hits=\$adaptor"
         echo "gx_db_build=\${db:-unknown}"
         echo "screen_status=\$status"
+        echo "organelle_gx_actions=\$org_gx"
+        echo "organelle_adaptor_hits=\$org_adaptor"
+        echo "organelle_screen_status=\$org_status"
     } > ${sample_id}_ncbi_screen.txt
     """
 }
