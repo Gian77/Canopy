@@ -28,13 +28,14 @@ def rows(path):
 with open(a.decisions) as fh:
     decision = {r["name"].replace("+", "plus"): r["decision"] for r in csv.DictReader(fh, delimiter="\t")}
 
-fields = ["sample", "sequence", "contig", "trimmed_start_bp", "trimmed_end_bp", "kept_bp", "decision"]
+fields = ["sample", "sequence", "contig", "trimmed_start_bp", "trimmed_end_bp", "kept_bp", "decision", "internal_cut_bp"]
 merged = {}
 for r in rows(a.prior) + rows(a.new):
     key = (r["sequence"], r["contig"])
     if key in merged:
         merged[key]["trimmed_start_bp"] = int(merged[key]["trimmed_start_bp"]) + int(r["trimmed_start_bp"])
         merged[key]["trimmed_end_bp"] = int(merged[key]["trimmed_end_bp"]) + int(r["trimmed_end_bp"])
+        merged[key]["internal_cut_bp"] = int(merged[key]["internal_cut_bp"]) + int(r["internal_cut_bp"])
         merged[key]["kept_bp"] = r["kept_bp"]
     else:
         merged[key] = dict(r)
@@ -48,8 +49,10 @@ with open(a.new, "w", newline="") as fh:
 
 kept = [r for r in merged.values() if r["decision"] not in ("remove", "too_short")]
 updates = {
-    "adapter_contig_ends_trimmed": len(kept),
+    "adapter_contig_ends_trimmed": sum(1 for r in kept if int(r["trimmed_start_bp"]) + int(r["trimmed_end_bp"])),
     "adapter_bases_trimmed": sum(int(r["trimmed_start_bp"]) + int(r["trimmed_end_bp"]) for r in kept),
+    "adapter_internal_cuts": sum(1 for r in kept if int(r["internal_cut_bp"])),
+    "adapter_internal_bases_cut": sum(int(r["internal_cut_bp"]) for r in kept),
 }
 with open(a.stats) as fh:
     lines = [line.rstrip("\n").split("=", 1) for line in fh if "=" in line]

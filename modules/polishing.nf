@@ -29,38 +29,6 @@ process POLISH_MEDAKA {
     """
 }
 
-process POLISH_MEDAKA_ORGANELLE {
-    tag       { "${sample_id}_${compartment}" }
-    label     'polish'
-    publishDir { "${params.outdir}/assembly/${compartment}/${sample_id}" }, mode: 'copy'
-    container 'quay.io/biocontainers/medaka:2.2.1--py312hc7af5e1_0'
-
-    input:
-    tuple val(sample_id), val(compartment), path(assembly), path(reads)
-
-    output:
-    tuple val(sample_id), val(compartment), path("${sample_id}_${compartment}_polished.fasta"), emit: assembly
-    path "medaka_${sample_id}_${compartment}/*", optional: true,                                 emit: log
-
-    script:
-    """
-    if [ -s ${assembly} ]; then
-        medaka_consensus \\
-            -i ${reads} \\
-            -d ${assembly} \\
-            -o medaka_${sample_id}_${compartment} \\
-            -t ${task.cpus} \\
-            -m ${params.medaka_model}
-
-        cp medaka_${sample_id}_${compartment}/consensus.fasta ${sample_id}_${compartment}_polished.fasta
-    else
-        echo "No ${compartment} assembly to polish — passing through empty file" >&2
-        mkdir -p medaka_${sample_id}_${compartment}
-        touch ${sample_id}_${compartment}_polished.fasta
-    fi
-    """
-}
-
 process PURGE_DUPS {
     tag       { sample_id }
     label     'polish'

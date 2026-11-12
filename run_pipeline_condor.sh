@@ -26,9 +26,12 @@ esac
 
 # Concurrent Nextflow head processes need independent launch directories,
 # because Nextflow stores the session lock in <launchDir>/.nextflow/.
-RUN_DIR="${PROJECT_DIR}/.canopy-run-${sample}"
+RUN_DIR="${PROJECT_DIR}/.canopy-run-${sample}${WORK_SUFFIX:-}"
 mkdir -p "${RUN_DIR}"
 cd "${RUN_DIR}"
+
+# All five FASTQs mix the native run 4704P (barcodes 17-21) with Rapid runs (barcodes 01-05).
+DORADO_KIT="barcode17=SQK-NBD114-24,barcode18=SQK-NBD114-24,barcode19=SQK-NBD114-24,barcode20=SQK-NBD114-24,barcode21=SQK-NBD114-24,SQK-RBK114-24"
 
 echo "=== Starting ${sample} ==="
 exec "${CONDA_ENV}/bin/nextflow" run "${PROJECT_DIR}/main.nf" \
@@ -38,8 +41,11 @@ exec "${CONDA_ENV}/bin/nextflow" run "${PROJECT_DIR}/main.nf" \
     --mt_ref "${PROJECT_DIR}/refs/sorghum/sorghum_mt_NC008360.fasta" \
     --nuclear_ref "${PROJECT_DIR}/refs/sorghum/Sbicolor_730_v5.0.fa" \
     --outdir "${PROJECT_DIR}/results_${sample}${OUTDIR_SUFFIX:-}" \
-    -w "${PROJECT_DIR}/nf-work-${sample}" \
-    --organelle_assembler flye \
+    -w "${PROJECT_DIR}/nf-work-${sample}${WORK_SUFFIX:-}" \
+    --organelle_assembler "${ORGANELLE_ASSEMBLER:-auto}" \
+    --nuclear_assembler "${NUCLEAR_ASSEMBLER:-hifiasm}" \
+    --read_trimming dorado \
+    --dorado_kit "${DORADO_KIT}" \
     --run_qualimap true \
     --run_blobtools true \
     --run_kraken2 true \

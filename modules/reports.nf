@@ -24,7 +24,9 @@ process FINAL_SUMMARY {
           path(contam_summary,  stageAs: 'contam_summary.txt'),
           path(sylph_summary,   stageAs: 'sylph_summary.txt'),
           path(blast_summary,   stageAs: 'blast_summary.txt'),
-          path(ncbi_screen,     stageAs: 'ncbi_screen.txt')
+          path(ncbi_screen,     stageAs: 'ncbi_screen.txt'),
+          path(organelle_choice_cp, stageAs: 'organelle_choice_cp.md'),
+          path(organelle_choice_mt, stageAs: 'organelle_choice_mt.md')
 
     output:
     tuple val(sample_id), path("${sample_id}_assembly_summary.md"), emit: summary
@@ -34,6 +36,8 @@ process FINAL_SUMMARY {
     def sample    = sample_id
     def gsize     = params.genome_size
     def final_asm = params.final_assembly
+    def asm_label = params.nuclear_assembler
+    def asm_name  = (asm_label == 'hifiasm') ? 'hifiasm' : 'Flye'
     def screened  = (params.run_kraken2 || params.run_blobtools)
     def taxo_screened = params.run_kraken2
     def decontam_ran  = params.flag_contaminants
@@ -50,6 +54,9 @@ process FINAL_SUMMARY {
     def blob_plot     = "blobtools/${blob_prefix}.${blob_prefix}.blobDB.json.bestsum.phylum.p8.span.100.blobplot"
     def canopy_repo   = 'https://github.com/Gian77/Canopy'
     def canopy_dev    = 'Gian M. N. Benucci'
+    def org_mode      = params.organelle_assembler
+    def cp_tol_pct    = Math.round(params.organelle_cp_size_tol * 100)
+    def mt_tol_pct    = Math.round(params.organelle_mt_size_tol * 100)
     """
     #!/usr/bin/env bash
     set -uo pipefail
@@ -154,7 +161,7 @@ process FINAL_SUMMARY {
     READ_N50=\$(nano 'n50')
     MEAN_QUAL=\$(nano 'mean.qual')
 
-    GFRAC_FLYE=\$(qval "Genome fraction (%)" "flye")
+    GFRAC_DRAFT=\$(qval "Genome fraction (%)" "${asm_label}")
     GFRAC_PURGE=\$(qval "Genome fraction (%)" "purge_dups")
     GFRAC_SCAFFOLD=\$(qval "Genome fraction (%)" "purge_dups_scaf")
     # Pre-purge (Medaka) RagTag scaffold, when present.
@@ -162,12 +169,12 @@ process FINAL_SUMMARY {
     GFRAC_DECONTAM=\$(qval "Genome fraction (%)" "decontam")
     N50_DECONTAM=\$(qval "N50" "decontam")
     LEN_DECONTAM=\$(qval "Total length" "decontam")
-    N50_FLYE=\$(qval "N50" "flye")
+    N50_DRAFT=\$(qval "N50" "${asm_label}")
     N50_SCAFFOLD=\$(qval "N50" "purge_dups_scaf")
-    LEN_FLYE=\$(qval "Total length" "flye")
+    LEN_DRAFT=\$(qval "Total length" "${asm_label}")
     LEN_PURGE=\$(qval "Total length" "purge_dups")
-    NCONTIGS_FLYE=\$(qval "# contigs" "flye")
-    MISASM_FLYE=\$(qval "# misassemblies" "flye")
+    NCONTIGS_DRAFT=\$(qval "# contigs" "${asm_label}")
+    MISASM_DRAFT=\$(qval "# misassemblies" "${asm_label}")
     MISASM_SCAFFOLD=\$(qval "# misassemblies" "purge_dups_scaf")
 
     # The published final genome is selected by --final_assembly (default: medaka). Keep the
@@ -193,8 +200,8 @@ process FINAL_SUMMARY {
         print s
     }' | awk -v tb="\$TOTAL_BASES" 'BEGIN{tb+=0} {if(\$1>0) printf "%.0fx", tb/\$1; else print "NAx"}')
 
-    PURGE_RETAINED=\$(echo "\$LEN_PURGE \$LEN_FLYE" | awk '{if(\$2>0) printf "%.1f", \$1/\$2*100; else print "NA"}')
-    PURGE_REMOVED=\$(echo "\$LEN_PURGE \$LEN_FLYE"  | awk '{if(\$2>0) printf "%.1f", (1-\$1/\$2)*100; else print "NA"}')
+    PURGE_RETAINED=\$(echo "\$LEN_PURGE \$LEN_DRAFT" | awk '{if(\$2>0) printf "%.1f", \$1/\$2*100; else print "NA"}')
+    PURGE_REMOVED=\$(echo "\$LEN_PURGE \$LEN_DRAFT"  | awk '{if(\$2>0) printf "%.1f", (1-\$1/\$2)*100; else print "NA"}')
     C_JUNK=\$(awk '{print \$1}' "\$CUTOFFS" 2>/dev/null || echo "?")
     C_HAP_LOW=\$(awk '{print \$2}' "\$CUTOFFS" 2>/dev/null || echo "?")
     C_HAP_HIGH=\$(awk '{print \$3}' "\$CUTOFFS" 2>/dev/null || echo "?")
@@ -252,9 +259,9 @@ process FINAL_SUMMARY {
 
     PEAK=\$(grep "autotune" "\$CALCUTS" 2>/dev/null | grep -o 'Peak: [0-9]*x' | grep -o '[0-9]*' || echo "unknown")
 
-    # Contiguity is scored on the Flye contig N50: scaffold N50 reflects RagTag placement against
+    # Contiguity is scored on the assembler's contig N50: scaffold N50 reflects RagTag placement against
     # the reference, so it looks chromosome-scale for any assembly that can be anchored.
-    QUALITY_TIER=\$(awk -v c="\$BUSCO_C" -v gf="\$GFRAC_SCAFFOLD" -v n50="\$N50_FLYE" 'BEGIN {
+    QUALITY_TIER=\$(awk -v c="\$BUSCO_C" -v gf="\$GFRAC_SCAFFOLD" -v n50="\$N50_DRAFT" 'BEGIN {
         c=c+0; gf=gf+0; n50=n50+0; score=0
         if (c  >= 95) score+=2; else if (c  >= 90) score++
         if (gf >= 80) score+=2; else if (gf >= 60) score++
@@ -285,7 +292,7 @@ process FINAL_SUMMARY {
     }
 
     assembly_interp() {
-        awk -v gf="\$GFRAC_SCAFFOLD" -v n50="\$N50_SCAFFOLD" -v misasm="\$MISASM_SCAFFOLD" -v mf="\$MISASM_FLYE" 'BEGIN {
+        awk -v gf="\$GFRAC_SCAFFOLD" -v n50="\$N50_SCAFFOLD" -v misasm="\$MISASM_SCAFFOLD" -v mf="\$MISASM_DRAFT" 'BEGIN {
             gf=gf+0; n50=n50+0; misasm=misasm+0; mf=mf+0
             if (gf >= 85)      gfmsg="high -- assembly covers most of the reference"
             else if (gf >= 70) gfmsg="moderate -- some regions absent or divergent"
@@ -295,12 +302,12 @@ process FINAL_SUMMARY {
             else if (n50 >= 10000000) n50msg="near-chromosome-scale (10-50 Mb)"
             else if (n50 >= 1000000)  n50msg="Mb-scale (1-10 Mb)"
             else                      n50msg="sub-Mb -- scaffolding may be limited by contig fragmentation"
-            printf "Scaffold N50 is %.1f Mb. Reference genome fraction: %.1f%% (%s). Misassemblies: %d (Flye) -> %d (scaffold).", n50/1e6, gf, gfmsg, mf, misasm
+            printf "Scaffold N50 is %.1f Mb. Reference genome fraction: %.1f%% (%s). Misassemblies: %d (${asm_name}) -> %d (scaffold).", n50/1e6, gf, gfmsg, mf, misasm
         }'
     }
 
     purge_interp() {
-        awk -v ret="\$PURGE_RETAINED" -v gf_pre="\$GFRAC_FLYE" -v gf_post="\$GFRAC_PURGE" -v peak="\$PEAK" \
+        awk -v ret="\$PURGE_RETAINED" -v gf_pre="\$GFRAC_DRAFT" -v gf_post="\$GFRAC_PURGE" -v peak="\$PEAK" \
             -v junk="\$C_JUNK" -v hl="\$C_HAP_LOW" -v hh="\$C_HAP_HIGH" \
             -v dl="\$C_DIP_LOW" -v dh="\$C_DIP_HIGH" -v rep="\$C_REPEAT" 'BEGIN {
             ret=ret+0; gf_pre=gf_pre+0; gf_post=gf_post+0; drop=gf_pre-gf_post
@@ -327,14 +334,14 @@ process FINAL_SUMMARY {
     }
 
     scaffold_interp() {
-        awk -v pct="\$PLACED_PCT" -v n50c="\$N50_FLYE" -v n50s="\$N50_SCAFFOLD" 'BEGIN {
+        awk -v pct="\$PLACED_PCT" -v n50c="\$N50_DRAFT" -v n50s="\$N50_SCAFFOLD" 'BEGIN {
             pct=pct+0; n50c=n50c+0; n50s=n50s+0
             if (pct >= 85)      anch="excellent anchoring"
             else if (pct >= 70) anch="good anchoring"
             else if (pct >= 50) anch="moderate anchoring"
             else                anch="low anchoring -- many contigs unplaced, possibly from highly divergent or novel sequence"
             fold=int(n50s/n50c)
-            printf "%s (%d%% of bases placed on chromosomes). Flye contig N50 is %.1f kb; scaffold N50 is %.1f Mb because RagTag orders contigs along the reference, so it does not measure assembly contiguity.", anch, pct, n50c/1e3, n50s/1e6
+            printf "%s (%d%% of bases placed on chromosomes). ${asm_name} contig N50 is %.1f kb; scaffold N50 is %.1f Mb because RagTag orders contigs along the reference, so it does not measure assembly contiguity.", anch, pct, n50c/1e3, n50s/1e6
         }'
     }
 
@@ -379,13 +386,23 @@ process FINAL_SUMMARY {
       # ── 2. Organelle assemblies ──────────────────────────────────────────
       echo "## 2. Organelle assemblies (QUAST)"
       echo
-      echo "Organelle assemblies were built with ${params.organelle_assembler}, filtered against the supplied references and polished with Medaka before evaluation."
+      if [ "${org_mode}" = "auto" ]; then
+          echo "**How each organelle was chosen.** Oatk, hifiasm and Flye each assembled the chloroplast and the mitochondrion. Oatk used all filtered reads, hifiasm the organelle reads subsampled to about 200x, and Flye the organelle reads. Contigs that failed the reference filter were dropped first."
+          echo
+          echo "An assembly qualifies only if it is **one sequence**, its assembler reports it as **circular**, and its length is within **${cp_tol_pct}% of the reference for the chloroplast** or **${mt_tol_pct}% for the mitochondrion**. The qualifying assembly closest to the reference length is kept. If none qualifies, the Flye assembly is kept whole, and it may be in several pieces."
+      else
+          echo "Organelle assemblies were built with ${org_mode} and filtered against the supplied references."
+      fi
+      echo
+      echo "**Organelles are not polished.** In Canopy's sorghum genomes, Medaka added substitutions inside the chloroplast inverted repeat, where unpolished assemblies matched the reference, and did not reduce the overall error rate. Scores below are for the unpolished sequence."
       echo
       if [ -n "\$(ncbi organelle_screen_status)" ]; then
           echo "> **NCBI screens of \\`${sample}_chloroplast.fasta\\` and \\`${sample}_mitochondria.fasta\\` (status \$(ncbi organelle_screen_status)):** FCS-GX actions \$(ncbi organelle_gx_actions), FCS-adaptor hits \$(ncbi organelle_adaptor_hits). Both were screened together, with the same FCS-GX database as the nuclear genome. Hits are reported, not removed; the reports are \\`${sample}_organelles.fcs_gx_report.txt\\` and \\`${sample}_organelles.fcs_adaptor_report.txt\\` in \\`screening/\\`."
           echo
       fi
       echo "### Chloroplast"
+      echo
+      cat organelle_choice_cp.md
       echo
       orgheader "\$QUAST_CP"
       orgrow "# contigs (>= 0 bp)" "\$QUAST_CP"
@@ -398,6 +415,8 @@ process FINAL_SUMMARY {
       echo "> **Interpretation:** \$(org_interp "Chloroplast" "\$QUAST_CP")"
       echo
       echo "### Mitochondria"
+      echo
+      cat organelle_choice_mt.md
       echo
       orgheader "\$QUAST_MT"
       orgrow "# contigs (>= 0 bp)" "\$QUAST_MT"
@@ -414,7 +433,7 @@ process FINAL_SUMMARY {
       echo "## 3. Nuclear assembly progression (QUAST)"
       echo
       if [ "${has_ref}" = "true" ]; then
-          echo "**Columns, in pipeline order:** **flye** is the raw Flye assembly; **medaka** is that assembly after Medaka polishing; **purge_dups** is the Medaka assembly after haplotig removal; **medaka_scaf** and **purge_dups_scaf** are the Medaka and purge_dups genomes after RagTag correction and chromosome scaffolding; **reference** is the nuclear reference scored against itself, the best value each row can reach."
+          echo "**Columns, in pipeline order:** **${asm_label}** is the raw ${asm_name} assembly; **medaka** is that assembly after Medaka polishing; **purge_dups** is the Medaka assembly after haplotig removal; **medaka_scaf** and **purge_dups_scaf** are the Medaka and purge_dups genomes after RagTag correction and chromosome scaffolding; **reference** is the nuclear reference scored against itself, the best value each row can reach."
           echo
           if [ "${fcs_ran}" = "true" ]; then
               echo "**decontam is the published genome, \\`${sample}_final.fasta\\`.** It comes from the RagTag chromosome-scaffolded ${final_label} genome (the **${final_scaf}** column): the contaminant contigs of section 7 were removed and adapters were trimmed from contig ends. Every other column still contains the removed contigs. QUAST counts only sequences of 500 bp or more, so this column can show slightly fewer sequences and bases than the file itself."
@@ -444,10 +463,10 @@ process FINAL_SUMMARY {
       echo "- **# contigs:** the number of sequences of 500 bp or more. RagTag joins contigs into chromosome scaffolds, so the count drops in the scaffolded columns; removing contaminant contigs lowers it again in **decontam**."
       echo "- **Total length:** the bases in those sequences. The drop from **medaka** to **purge_dups** is the sequence purge_dups removed as haplotigs; the drop from **${final_scaf}** to **decontam** is the contaminant sequence removed in section 7. Scaffolding adds a little length as gap bases."
       echo "- **Largest contig:** the longest sequence. In the scaffolded columns it is a whole chromosome scaffold."
-      echo "- **N50:** half of the total length lies in sequences at least this long. In the scaffolded columns it is a scaffold N50 that follows the reference chromosomes, not a measure of assembly contiguity; for contiguity, read the N50 of the **flye** column."
+      echo "- **N50:** half of the total length lies in sequences at least this long. In the scaffolded columns it is a scaffold N50 that follows the reference chromosomes, not a measure of assembly contiguity; for contiguity, read the N50 of the **${asm_label}** column."
       echo "- **GC (%):** the GC content, expected to sit close to the reference. Contaminants with a different GC pull it away, so a value that moves toward the reference after removal agrees with the screen."
       echo "- **Genome fraction (%):** the share of reference bases covered by alignments of the assembly. It falls when sequence is missing and also where this line differs from the reference, so a few points below the reference is expected. A large fall after purge_dups means unique sequence was removed (section 4)."
-      echo "- **# misassemblies:** places where a sequence aligns to the reference with a relocation, inversion or translocation. Many are real structural differences between this line and the reference rather than errors, and scaffold joins follow the reference, so compare columns instead of reading the count alone."
+      echo "- **# misassemblies:** places where a sequence aligns to the reference with a relocation, inversion or translocation. Many are real structural differences between this line and the reference rather than errors, and scaffold joins follow the reference, so compare columns instead of reading the count alone. The fair comparison between assemblies of one sample is the contig-level columns (**${asm_label}**, **medaka**), because the scaffolded columns take their structure from the same reference QUAST uses. The count also rises with the amount of sequence that aligns, so divide it by aligned length when assemblies differ in size. Lines further from the reference score more, in step with their mismatch rate, so only a reference from the same line turns this count into an error count."
       echo "- **# N's per 100 kbp:** gap bases. Contig columns have none; each RagTag join adds a 100 bp gap. Removing contaminant contigs, which carry no gaps, raises the rate slightly in **decontam** because the total length falls while the gaps stay."
       echo
 
@@ -553,7 +572,20 @@ process FINAL_SUMMARY {
               echo
               echo "> **GC and coverage** are recorded for every sequence and support interpretation but do not trigger removal: GC alone would remove real plant contigs, and contaminant coverage overlaps plant coverage."
               echo
-              echo "> **NCBI screens of \\`${sample}_final.fasta\\` (status \$(ncbi screen_status)):** FCS-GX EXCLUDE \$(ncbi gx_exclude), other FCS-GX actions \$(ncbi gx_other_actions), FCS-adaptor hits \$(ncbi adaptor_hits). Before this check, \$(ncbi adapter_bases_trimmed) bp of adapter and flanking sequence were trimmed from \$(ncbi adapter_contig_ends_trimmed) contigs (\\`${sample}_adapter_trims.tsv\\`). FCS-GX database build \$(ncbi gx_db_build), the latest available; NCBI may screen with a newer one, so a pass here is strong evidence rather than a guarantee of acceptance."
+              PLACED_CUT=\$(ncbi placed_fix_regions_cut)
+              PLACED_KEPT=\$(ncbi placed_fix_regions_kept)
+              if [ -n "\$PLACED_CUT" ] && [ "\$PLACED_CUT" != 0 ]; then
+                  echo "> [!IMPORTANT]"
+                  echo "> **Cut from inside chromosome scaffolds: \$PLACED_CUT FCS-GX FIX region(s), \$(ncbi placed_fix_bases_cut) bp.** \$(ncbi placed_fix_detail). The contig rule removes only whole unplaced contigs, so a foreign stretch inside a placed contig survives it. Each region here was called foreign by FCS-GX and under ${(params.contam_max_ref_aligned * 100) as int}% of it aligns to the nuclear reference, so it was cut from \\`${sample}_final.fasta\\`."
+                  echo ">"
+                  echo "> \\`${sample}_full_flagged.fasta\\` keeps these bases, and the header of each affected sequence gives the region as \\`fcs_fix_cut=start-stop\\`. Positions after a cut therefore differ by its length between the two genomes, and each genome's AGP matches its own FASTA. The whole sequence still counts under review contigs above, so that figure can be far larger than the region itself. Evidence is in \\`${sample}_placed_fcs_cuts.tsv\\`."
+                  echo
+              fi
+              if [ -n "\$PLACED_KEPT" ] && [ "\$PLACED_KEPT" != 0 ]; then
+                  echo "> **Left in place: \$PLACED_KEPT FCS-GX FIX region(s) on chromosome scaffolds,** because they align to the nuclear reference or could not be cut within one contig. See \\`${sample}_placed_fcs_cuts.tsv\\`."
+                  echo
+              fi
+              echo "> **NCBI screens of \\`${sample}_final.fasta\\` (status \$(ncbi screen_status)):** FCS-GX EXCLUDE \$(ncbi gx_exclude), other FCS-GX actions \$(ncbi gx_other_actions), FCS-adaptor hits \$(ncbi adaptor_hits). Before this check, \$(ncbi adapter_bases_trimmed) bp of adapter and flanking sequence were trimmed from \$(ncbi adapter_contig_ends_trimmed) contigs (\\`${sample}_adapter_trims.tsv\\`), and \$(ncbi adapter_internal_cuts) contigs with adapter far from both ends were split there with a 100 bp gap. FCS-GX database build \$(ncbi gx_db_build), the latest available; NCBI may screen with a newer one, so a pass here is strong evidence rather than a guarantee of acceptance."
           else
           echo "> **Interpretation:** \$CONTAM_FLAGGED contigs (\${CONTAM_MB} Mb) were moved out of" \
                "the nuclear genome into \\`${sample}_removed_contigs.fasta\\` -- simultaneously" \
@@ -611,13 +643,13 @@ process FINAL_SUMMARY {
       echo "## Conclusion"
       echo
       if [ "${fcs_ran}" = "true" ]; then
-          echo "**Use \\`${sample}_final.fasta\\` as the nuclear genome.** It excludes the \$CONTAM_FLAGGED contaminant contigs (\${CONTAM_MB} Mb) and has adapters trimmed from contig ends. \\`${sample}_full_flagged.fasta\\` holds every contig, trimmed the same way, with the decision in each header. The headline contig N50 below is measured on the Flye assembly before these steps; section 5 gives the published genome's value."
+          echo "**Use \\`${sample}_final.fasta\\` as the nuclear genome.** It excludes the \$CONTAM_FLAGGED contaminant contigs (\${CONTAM_MB} Mb) and has adapters trimmed from contig ends. \\`${sample}_full_flagged.fasta\\` holds every contig, trimmed the same way, with the decision in each header. The headline contig N50 below is measured on the ${asm_name} assembly before these steps; section 5 gives the published genome's value."
           echo
       elif [ "${decontam_ran}" = "true" ]; then
-          echo "**Use \\`${sample}_nuclear.fasta\\` as the nuclear genome.** It excludes the \$CONTAM_FLAGGED contigs (\${CONTAM_MB} Mb) in \\`${sample}_removed_contigs.fasta\\` and still contains the \$REVIEW_CONTIGS review contigs (\${REVIEW_MB} Mb). The figures below describe this genome, except the contig N50, which is measured on the Flye assembly before removal."
+          echo "**Use \\`${sample}_nuclear.fasta\\` as the nuclear genome.** It excludes the \$CONTAM_FLAGGED contigs (\${CONTAM_MB} Mb) in \\`${sample}_removed_contigs.fasta\\` and still contains the \$REVIEW_CONTIGS review contigs (\${REVIEW_MB} Mb). The figures below describe this genome, except the contig N50, which is measured on the ${asm_name} assembly before removal."
           echo
       fi
-      echo "The **${sample}** nuclear genome assembly is of **\${QUALITY_TIER} overall quality** based on BUSCO completeness (\${BUSCO_C}%), contig N50 (\${N50_FLYE} bp), and reference genome fraction (\${GFRAC_SCAFFOLD}%). Scaffold N50 (\${N50_SCAFFOLD} bp) reflects placement against the reference, so it is not independent evidence of contiguity or chromosome structure."
+      echo "The **${sample}** nuclear genome assembly is of **\${QUALITY_TIER} overall quality** based on BUSCO completeness (\${BUSCO_C}%), contig N50 (\${N50_DRAFT} bp), and reference genome fraction (\${GFRAC_SCAFFOLD}%). Scaffold N50 (\${N50_SCAFFOLD} bp) reflects placement against the reference, so it is not independent evidence of contiguity or chromosome structure."
       echo
       PURGE_MB=\$(echo \$LEN_PURGE | awk '{printf "%.0f Mb", \$1/1e6}')
       if [ "${final_asm}" = "purge" ]; then
@@ -638,7 +670,7 @@ process FINAL_SUMMARY {
       else
         CONTAM_POINT="**Contamination screening:** not performed; enable --run_kraken2 and --run_blobtools to screen the final assembly."
       fi
-      echo "**Sequencing:** \$COVERAGE ONT reads at mean quality Q\${MEAN_QUAL} (read N50 \${READ_N50} bp). **Assembly:** Flye produced \$NCONTIGS_FLYE contigs totalling \$(echo \$LEN_FLYE | awk '{printf "%.0f Mb", \$1/1e6}') from a \$(echo \$TOTAL_BASES | awk '{printf "%.1f Gb", \$1/1e9}') read set. **Polishing:** Medaka corrected base-level errors without structural changes. \${HAPLO_SENTENCE} **Scaffolding:** RagTag anchored \${PLACED_PCT}% of assembled bases to chromosomal positions using the reference, raising scaffold N50 to \$(echo \$N50_SCAFFOLD | awk '{printf "%.1f Mb", \$1/1e6}'). **Gene space:** BUSCO completeness \${BUSCO_C}% (${busco_lin}), with \${BUSCO_D}% duplication and \${BUSCO_M}% missing genes. \${CONTAM_POINT}"
+      echo "**Sequencing:** \$COVERAGE ONT reads at mean quality Q\${MEAN_QUAL} (read N50 \${READ_N50} bp). **Assembly:** ${asm_name} produced \$NCONTIGS_DRAFT contigs totalling \$(echo \$LEN_DRAFT | awk '{printf "%.0f Mb", \$1/1e6}') from a \$(echo \$TOTAL_BASES | awk '{printf "%.1f Gb", \$1/1e9}') read set. **Polishing:** Medaka corrected base-level errors without structural changes. \${HAPLO_SENTENCE} **Scaffolding:** RagTag anchored \${PLACED_PCT}% of assembled bases to chromosomal positions using the reference, raising scaffold N50 to \$(echo \$N50_SCAFFOLD | awk '{printf "%.1f Mb", \$1/1e6}'). **Gene space:** BUSCO completeness \${BUSCO_C}% (${busco_lin}), with \${BUSCO_D}% duplication and \${BUSCO_M}% missing genes. \${CONTAM_POINT}"
       echo
       awk -v c="\$BUSCO_C" -v gf="\$GFRAC_SCAFFOLD" -v ret="\$PURGE_RETAINED" -v dup="\$BUSCO_D" -v m="\$BUSCO_M" 'BEGIN {
           c=c+0; gf=gf+0; ret=ret+0; dup=dup+0; m=m+0
@@ -719,9 +751,13 @@ process PACKAGE_RESULTS {
     fi
 
     # The published nuclear genome excludes removed contigs when screening ran, and its AGP matches.
+    # The FASTAs write '+' in sequence IDs as 'plus' (NCBI rejects '+'). Tables keyed by sequence name
+    # use the same IDs, so they join to the FASTA.
+    plus_ids() { awk 'BEGIN { FS = OFS = "\\t" } NR > 1 { gsub(/\\+/, "plus", \$1) } 1' "\$1"; }
+
     if [ "${has_final}" = "true" ]; then
         cp decontam.fasta          "\$PKG/${sample_id}_final.fasta"
-        cp contamination_audit.tsv "\$PKG/${sample_id}_contig_decisions.tsv"
+        plus_ids contamination_audit.tsv > "\$PKG/${sample_id}_contig_decisions.tsv"
         cp final_set/* "\$PKG/"
         mkdir -p "\$PKG/screening"
         mv "\$PKG"/*.fcs_gx_report.txt "\$PKG"/*.fcs_adaptor_report.txt "\$PKG/${sample_id}_ncbi_screen.txt" "\$PKG/screening/"
@@ -748,11 +784,11 @@ process PACKAGE_RESULTS {
     fi
 
     if [ "${has_sylph}" = "true" ]; then
-        cp sylph_corroboration.tsv   "\$PKG/${sample_id}_sylph_corroboration.tsv"
+        plus_ids sylph_corroboration.tsv > "\$PKG/${sample_id}_sylph_corroboration.tsv"
     fi
 
     if [ "${has_blast}" = "true" ]; then
-        cp blast_corroboration.tsv   "\$PKG/${sample_id}_blast_corroboration.tsv"
+        plus_ids blast_corroboration.tsv > "\$PKG/${sample_id}_blast_corroboration.tsv"
     fi
 
     cat > "\$PKG/README.txt" << 'EOF'
@@ -760,7 +796,7 @@ ${sample_id} -- final results package
 ======================================
 
 ${sample_id}_assembly_summary.md   -- narrative QC summary (start here)
-pipeline_tools.md                  -- tool/version rationale for the whole pipeline
+pipeline_tools.md                  -- what each tool does and why, with citations
 
 The genome files
 ${sample_id}_final.fasta            -- nuclear genome to use: Medaka-polished, chromosome-scaffolded,
@@ -783,9 +819,12 @@ ${sample_id}_final.agp, _full_flagged.agp
 ${sample_id}_contig_decisions.tsv   -- decision (keep/review/remove), rule, GC, coverage and evidence
                                        per sequence (_contamination_audit.tsv without --fcs_screen)
 ${sample_id}_adapter_trims.tsv      -- bases trimmed from each contig end
+${sample_id}_placed_fcs_cuts.tsv    -- only if a second cleaning round ran: FCS-GX FIX regions on
+                                       chromosome scaffolds and whether each was cut. A cut region stays
+                                       in _full_flagged.fasta, so positions after it differ from _final.fasta
 screening/                          -- FCS-GX and FCS-adaptor reports, before ('full') and after
-                                       ('final') cleaning; 'final2' means a second cleaning round was
-                                       needed; 'organelles' is the chloroplast and mitochondria
+                                       ('final') cleaning; 'final2' is the second cleaning round, run
+                                       only when 'final' had hits, so both are kept; 'organelles' is the chloroplast and mitochondria
                                        screened together. _ncbi_screen.txt holds the outcome
 ${sample_id}_sylph_corroboration.tsv, ${sample_id}_blast_corroboration.tsv
                                     -- BLASTn and Sylph checks of candidate contigs. GTDB has no fungi.
@@ -828,14 +867,11 @@ Filters reads by minimum length (>=1 kb) and minimum mean quality. Removing shor
 reads reduces assembly fragmentation and lowers the chance of incorporating sequencing errors
 into the draft assembly. The filtered reads are used for all downstream steps.
 
-### Read trimming (--read_trimming; off by default)
-Optional adaptor and barcode removal from the raw reads before Filtlong, with one of three tools.
-Dorado demux trims the adaptors and barcodes of the named kit(s) and keeps every read. Porechop_ABI
-trims the adaptors given in --trim_adapters (or infers them ab initio) and splits reads with a
-middle adaptor. fastplong trims adaptors only; its quality and length filters are off, so Filtlong
-still does all filtering. Adaptor left in the reads ends up at contig ends, where FCS-adaptor finds
-it and it is trimmed from the contigs anyway; on one test genome all three tools removed about 98%
-of that adaptor without improving the assembly.
+### Read trimming (--read_trimming; default dorado)
+Adaptor and barcode removal from the raw reads before Filtlong. Dorado demux trims the adaptors and
+barcodes of the named kit(s) and keeps every read. fastplong is the alternative and trims adaptors
+only; its quality and length filters are off, so Filtlong still does all filtering. hifiasm needs
+trimmed reads, because untrimmed adaptor ends up inside its contigs rather than at contig ends.
 
 ---
 
@@ -853,17 +889,24 @@ Sorts and indexes the organelle alignment BAM so reads can be extracted by genom
 
 ## Organelle assembly
 
+With --organelle_assembler auto (default), Oatk, hifiasm and Flye all assemble both organelles and
+SELECT_ORGANELLE keeps one result per compartment. flye or oatk runs that assembler alone.
+
 ### Flye (organelle mode)
 De novo assembler for long reads. Assembled separately on deduplicated cp and mt read sets.
-Produces FASTA + assembly graph (GFA format). Used when --organelle_assembler flye (default).
+Produces FASTA + assembly graph (GFA format).
 
-### OATK (--organelle_assembler oatk)
+### OATK
 HMM-based organelle assembler. Identifies organelle reads directly from the full filtered
 read set using pHMM profiles from the OatkDB (embryophyta plant gene database), then assembles
 them. More sensitive than minimap2-based extraction for highly divergent species. Produces GFA
 files for both chloroplast and mitochondria simultaneously.
 
-### Bandage
+### hifiasm (organelle mode)
+Run with --ont -l0 -f0 on the deduplicated cp and mt reads, subsampled to about 200x because it
+is designed for nuclear depth.
+
+### Bandage (--organelle_assembler oatk)
 Renders the GFA assembly graph as a PNG image. A complete circular chloroplast typically
 appears as a single circular node or a two-bubble structure (reflecting the inverted repeat).
 Useful for a quick sanity check on organelle topology.
@@ -871,28 +914,35 @@ Useful for a quick sanity check on organelle topology.
 ### FILTER_ORGANELLE_CONTIGS
 After assembly, aligns organelle contigs back to the reference and retains only those with
 >=50% query coverage and >=70% identity. Removes nuclear-derived contigs (NUPTs/NUMTs) that
-Flye or OATK occasionally incorporates into the organelle assembly. Controlled by
---filter_organelles (default: true), --organelle_min_qcov, and --organelle_min_ident.
+Flye or OATK occasionally incorporates into the organelle assembly. Turned off with
+--filter_organelles false; the two thresholds are fixed in the code.
 
-### Medaka (organelle)
-Same polisher as the nuclear stage (see below), run separately on the filtered chloroplast and
-mitochondrial contigs using their own deduplicated read sets. Corrects raw ONT base-level errors
-before QUAST scoring — without this step, organelle mismatch/indel rates directly reflect
-uncorrected basecalling error rather than assembly quality.
+### SELECT_ORGANELLE
+Keeps one assembly per organelle (bin/canopy_select_organelle.py). An assembly qualifies when it is
+one sequence, its assembler reports it as circular, and its length is within
+--organelle_cp_size_tol (5%) or --organelle_mt_size_tol (15%) of the reference. The qualifying
+assembly closest to the reference length is kept; if none qualifies, the Flye assembly is kept
+whole. Organelles are not polished with Medaka, which added substitutions inside the chloroplast
+inverted repeat on the sorghum genomes.
 
 ---
 
 ## Nuclear assembly
 
-### Flye (nuclear mode)
+### hifiasm (--nuclear_assembler hifiasm, the default)
+Corrects the reads against each other, then builds a string graph, in ONT mode (--ont) for R10 simplex
+reads. Primary contigs are used. Duplicate purging inside hifiasm is off by default
+(--hifiasm_purge_level 0) because purge_dups runs afterwards.
+
+### Flye (--nuclear_assembler flye)
 Same assembler as for organelles, but run on the nuclear read set with the full estimated
 genome size (--genome_size). Uses a repeat graph approach to handle the high repeat content
 of plant genomes.
 
 ### Medaka
 Neural-network-based polisher trained on ONT signal data. Re-aligns the original reads to
-the Flye draft and calls a consensus sequence to correct base-level errors. Improves raw
-accuracy from approximately Q20 (Flye output) toward Q30+. The model must match the flowcell
+the draft assembly and calls a consensus sequence to correct base-level errors, mostly small
+indels. The model must match the flowcell
 chemistry and basecaller used; set via --medaka_model.
 
 ---
@@ -900,7 +950,7 @@ chemistry and basecaller used; set via --medaka_model.
 ## Haplotig removal (always runs; --final_assembly selects the final genome)
 
 ### purge_dups
-Removes redundant haplotig contigs from diploid assemblies. In a heterozygous organism, Flye
+Removes redundant haplotig contigs from diploid assemblies. In a heterozygous organism, the assembler
 may assemble both haplotypes of a locus as separate contigs. purge_dups identifies redundant
 contigs by two criteria:
 
@@ -936,7 +986,7 @@ sites. Produces two haplotype FASTA files. More compute-intensive than purge_dup
 ## Scaffolding (requires --nuclear_ref)
 
 ### RagTag
-Orders and orients purged contigs into chromosome-scale scaffolds by alignment to a reference
+Orders and orients contigs (of both the Medaka and the purge_dups genome) into chromosome-scale scaffolds by alignment to a reference
 genome. Two steps are run in sequence:
 
 - ragtag.py correct (enabled by default via --ragtag_correct): breaks contigs at positions
@@ -954,7 +1004,7 @@ synteny information even at moderate sequence identity.
 Computes standard assembly statistics (N50, total length, contig count, GC content) and,
 when a reference is provided, alignment-based metrics: genome fraction covered,
 misassemblies, and structural variants. Run simultaneously on all nuclear assembly stages
-(Flye, Medaka, purge_dups/medaka_nopurge, scaffold) to track how each step affects quality.
+(assembler output, Medaka, purge_dups/medaka_nopurge, scaffold) to track how each step affects quality.
 
 ### BUSCO
 Searches the final scaffolded assembly for a lineage-specific set of near-universal
@@ -1001,8 +1051,10 @@ contaminant flagging.
 NCBI's own screens, run on the full genome and again on the published FASTA, and on the
 chloroplast and mitochondria together (reported only; organelle hits are not removed). FCS-GX aligns against a
 large cross-species database and holds it in RAM (~470 GiB). FCS-GX EXCLUDE, or REVIEW with agreement
-from another source, removes an unplaced contig. FCS-adaptor hits are trimmed from contig ends, and a
-hit far from any contig end stops the run. Fungal alignment (minimap2) to --fungal_refs and BLASTn
+from another source, removes an unplaced contig. FCS-adaptor hits are trimmed from contig ends; a hit
+more than 1 kb from both ends splits the contig there with a 100 bp gap. A genome with hits on its final
+screen gets one more cleaning round, which also cuts FCS-GX FIX regions on placed sequences when under
+10% of the region aligns to the nuclear reference. Fungal alignment (minimap2) to --fungal_refs and BLASTn
 add evidence for contigs FCS-GX does not call; Kraken2 alone cannot see taxa absent from PlusPFP, such
 as Rhizopus. GC and coverage are recorded but do not trigger removal. Outputs: <sample>_final.fasta
 and <sample>_full_flagged.fasta. Without this option, the Kraken2 rule below decides removal.
@@ -1063,12 +1115,12 @@ Citations for each tool, in order of appearance, with project homepages.
 
 - **NanoPlot / NanoPack** -- De Coster W, et al. NanoPack: visualizing and processing long-read sequencing data. Bioinformatics. 2018;34(15):2666-2669. <https://github.com/wdecoster/NanoPlot>
 - **Filtlong** -- Wick RR. Filtlong (no associated publication). <https://github.com/rrwick/Filtlong>
-- **Dorado** (optional) -- Oxford Nanopore Technologies. Dorado (no associated publication). <https://github.com/nanoporetech/dorado>
-- **Porechop_ABI** (optional) -- Bonenfant Q, Noé L, Touzet H. Porechop_ABI: discovering unknown adapters in Oxford Nanopore Technology sequencing reads for downstream trimming. Bioinformatics Advances. 2023;3(1):vbac085. <https://github.com/bonsai-team/Porechop_ABI>
-- **fastplong** (optional) -- Chen S. fastplong (no associated publication). <https://github.com/OpenGene/fastplong>
+- **Dorado** (default read trimming) -- Oxford Nanopore Technologies. Dorado (no associated publication). <https://github.com/nanoporetech/dorado>
+- **fastplong** (alternative read trimming) -- Chen S. fastplong (no associated publication). <https://github.com/OpenGene/fastplong>
 - **minimap2** -- Li H. Minimap2: pairwise alignment for nucleotide sequences. Bioinformatics. 2018;34(18):3094-3100. <https://github.com/lh3/minimap2>
 - **SAMtools** -- Danecek P, et al. Twelve years of SAMtools and BCFtools. GigaScience. 2021;10(2):giab008. <https://www.htslib.org>
-- **Flye** -- Kolmogorov M, et al. Assembly of long, error-prone reads using repeat graphs. Nat Biotechnol. 2019;37:540-546. <https://github.com/fenderglass/Flye>
+- **hifiasm** (default nuclear assembler) -- Cheng H, Qu H, McKenzie S, Lawrence KR, Windsor R, Vella M, Park PJ, Li H. Efficient near telomere-to-telomere assembly of Nanopore Simplex reads. Nature. 2026. <https://github.com/chhylp123/hifiasm>
+- **Flye** (organelles; nuclear with --nuclear_assembler flye) -- Kolmogorov M, et al. Assembly of long, error-prone reads using repeat graphs. Nat Biotechnol. 2019;37:540-546. <https://github.com/fenderglass/Flye>
 - **OATK** -- Zhou C. Oatk: organelle assembly toolkit (no associated publication). <https://github.com/c-zhou/oatk>
 - **Bandage** -- Wick RR, et al. Bandage: interactive visualization of de novo genome assemblies. Bioinformatics. 2015;31(20):3350-3352. <https://rrwick.github.io/Bandage>
 - **Medaka** -- Oxford Nanopore Technologies. Medaka (no associated publication). <https://github.com/nanoporetech/medaka>
@@ -1080,7 +1132,7 @@ Citations for each tool, in order of appearance, with project homepages.
 - **MultiQC** -- Ewels P, et al. MultiQC: summarize analysis results for multiple tools and samples in a single report. Bioinformatics. 2016;32(19):3047-3048. <https://multiqc.info>
 - **Qualimap** -- Okonechnikov K, et al. Qualimap 2: advanced multi-sample quality control for high-throughput sequencing data. Bioinformatics. 2016;32(2):292-294. <http://qualimap.conf.es>
 - **BlobTools** -- Laetsch DR, Blaxter ML. BlobTools: Interrogation of genome assemblies. F1000Research. 2017;6:1287. <https://github.com/DRL/blobtools>
-- **Kraken2** -- Wood DE, Lu J, Langmead B. Improved metagenomic analysis with Kraken 2. Genome Biol. 2019;20:257. <https://github.com/DerrickWood/kraken2> (PlusPF prebuilt DB: <https://benlangmead.github.io/aws-indexes/k2>)
+- **Kraken2** -- Wood DE, Lu J, Langmead B. Improved metagenomic analysis with Kraken 2. Genome Biol. 2019;20:257. <https://github.com/DerrickWood/kraken2> (PlusPFP prebuilt DB: <https://benlangmead.github.io/aws-indexes/k2>)
 - **Sylph** -- Shaw J, Yu YW. Rapid species-level metagenome profiling and containment estimation with sylph. Nat Biotechnol. 2025;43:1348-1359. <https://github.com/bluenote-1577/sylph>
 - **FCS-GX** -- Astashyn A, et al. Rapid and sensitive detection of genome contamination at scale with FCS-GX. Genome Biol. 2024;25:60. <https://github.com/ncbi/fcs>
 - **FCS-adaptor** -- NCBI Foreign Contamination Screen (no associated publication). <https://github.com/ncbi/fcs>

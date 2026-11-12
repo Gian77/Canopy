@@ -18,7 +18,7 @@ SAMPLES=(B11077 BTx2932 F07020 F10702 F25101)
 
 run_sample() {
     local sample="$1"
-    local run_dir="${PROJECT_DIR}/.canopy-run-${sample}"
+    local run_dir="${PROJECT_DIR}/.canopy-run-${sample}${WORK_SUFFIX:-}"
     mkdir -p "${run_dir}"
     cd "${run_dir}"
     echo "=== Starting ${sample} ==="
@@ -29,8 +29,11 @@ run_sample() {
         --mt_ref "${PROJECT_DIR}/refs/sorghum/sorghum_mt_NC008360.fasta" \
         --nuclear_ref "${PROJECT_DIR}/refs/sorghum/Sbicolor_730_v5.0.fa" \
         --outdir "${PROJECT_DIR}/results_${sample}${OUTDIR_SUFFIX:-}" \
-        -w "${PROJECT_DIR}/nf-work-${sample}" \
-        --organelle_assembler flye \
+        -w "${PROJECT_DIR}/nf-work-${sample}${WORK_SUFFIX:-}" \
+        --organelle_assembler "${ORGANELLE_ASSEMBLER:-auto}" \
+        --nuclear_assembler "${NUCLEAR_ASSEMBLER:-hifiasm}" \
+        --read_trimming dorado \
+        --dorado_kit "barcode17=SQK-NBD114-24,barcode18=SQK-NBD114-24,barcode19=SQK-NBD114-24,barcode20=SQK-NBD114-24,barcode21=SQK-NBD114-24,SQK-RBK114-24" \
         --run_qualimap true \
         --run_blobtools true \
         --run_kraken2 true \

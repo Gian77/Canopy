@@ -1,6 +1,7 @@
 // ============================================================
 // modules/assembly.nf
-// Flye assemblies (cp/mt/nuclear) and OATK alternative for organelles
+// Organelles: Oatk, hifiasm and Flye (one is kept per compartment, see SELECT_ORGANELLE in qc.nf).
+// Nuclear: hifiasm (default) or Flye.
 // ============================================================
 
 process ASSEMBLE_CP_FLYE {
@@ -15,6 +16,7 @@ process ASSEMBLE_CP_FLYE {
     output:
     tuple val(sample_id), path("${sample_id}_cp_raw.fasta"), emit: assembly
     path  "flye_cp_${sample_id}/*",                          emit: log
+    tuple val(sample_id), path("flye_cp_${sample_id}/assembly_info.txt"), optional: true, emit: info
 
     script:
     """
@@ -53,6 +55,7 @@ process ASSEMBLE_MT_FLYE {
     output:
     tuple val(sample_id), path("${sample_id}_mt_raw.fasta"), emit: assembly
     path  "flye_mt_${sample_id}/*",                          emit: log
+    tuple val(sample_id), path("flye_mt_${sample_id}/assembly_info.txt"), optional: true, emit: info
 
     script:
     """
@@ -143,7 +146,77 @@ process ASSEMBLE_ORGANELLES_OATK {
     """
 }
 
-process ASSEMBLE_NUCLEAR {
+// Organelle reads are thousands of x deep and hifiasm is built for nuclear depth, so cap them at about 200x.
+process DOWNSAMPLE_ORGANELLE_READS {
+    tag       { "${sample_id}_${compartment}" }
+    label     'qc'
+    container 'quay.io/biocontainers/seqkit:2.13.0--he881be0_0'
+
+    input:
+    tuple val(sample_id), val(compartment), path(reads), val(target_bases)
+
+    output:
+    tuple val(sample_id), val(compartment), path("${sample_id}_${compartment}.sub.fastq.gz")
+
+    script:
+    """
+    set -euo pipefail
+    total=\$(seqkit stats -T ${reads} | awk 'NR == 2 { print \$5 }')
+    p=\$(awk -v t=${target_bases} -v n="\$total" 'BEGIN { x = t / n; if (x > 1) x = 1; printf "%.6f", x }')
+    echo "total bases \$total  sampling proportion \$p"
+    seqkit sample -s 11 -p "\$p" -o ${sample_id}_${compartment}.sub.fastq.gz ${reads}
+    """
+}
+
+// -f0: no bloom filter, as hifiasm's documentation advises for small genomes. -l0: no purging.
+process ASSEMBLE_ORGANELLE_HIFIASM {
+    tag        { "${sample_id}_${compartment}" }
+    label      'assemble_small'
+    publishDir { "${params.outdir}/assembly/${compartment}/${sample_id}/candidates/raw" }, mode: 'copy', pattern: '*.{fasta,log}'
+    container  'quay.io/biocontainers/hifiasm:0.25.0--h5ca1c30_0'
+
+    input:
+    tuple val(sample_id), val(compartment), path(reads)
+
+    output:
+    tuple val(sample_id), val(compartment), path("${sample_id}_${compartment}.hifiasm.fasta"), emit: assembly
+    path "${sample_id}_${compartment}.hifiasm.log", emit: log
+
+    script:
+    """
+    set -euo pipefail
+    hifiasm -o asm -t ${task.cpus} --ont -l0 -f0 ${reads} 2> ${sample_id}_${compartment}.hifiasm.log
+    awk '/^S/ { print ">" \$2; print \$3 }' asm.bp.p_ctg.gfa > ${sample_id}_${compartment}.hifiasm.fasta
+    rm -f asm.*.bin
+    """
+}
+
+// hifiasm ONT mode (R10 simplex reads). Primary contigs only. --hifiasm_purge_level is 0 by default
+// because purge_dups runs later and the sorghum lines are inbred.
+process ASSEMBLE_NUCLEAR_HIFIASM {
+    tag       { sample_id }
+    label     'assemble_heavy'
+    publishDir { "${params.outdir}/assembly/nuclear/${sample_id}" }, mode: 'copy'
+    container 'quay.io/biocontainers/hifiasm:0.25.0--h5ca1c30_0'
+
+    input:
+    tuple val(sample_id), path(reads)
+
+    output:
+    tuple val(sample_id), path("${sample_id}_nuclear.fasta"), emit: assembly
+    path  "${sample_id}.hifiasm.log",                          emit: log
+
+    script:
+    """
+    set -euo pipefail
+    hifiasm -o asm -t ${task.cpus} --ont -l${params.hifiasm_purge_level} ${reads} 2> ${sample_id}.hifiasm.log
+    awk '/^S/ { print ">" \$2; print \$3 }' asm.bp.p_ctg.gfa > ${sample_id}_nuclear.fasta
+    [ -s ${sample_id}_nuclear.fasta ]
+    rm -f asm.*.bin
+    """
+}
+
+process ASSEMBLE_NUCLEAR_FLYE {
     tag       { sample_id }
     label     'assemble_heavy'
     publishDir { "${params.outdir}/assembly/nuclear/${sample_id}" }, mode: 'copy'
