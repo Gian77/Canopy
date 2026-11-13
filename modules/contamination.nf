@@ -660,14 +660,76 @@ process WRITE_GENOME_VERSIONS {
     script:
     """
     python3 ${writer_script} --sample ${sample_id} --fasta ${assembly} --agp ${agp} \\
-        --decisions ${decisions} --adaptor-report ${adaptor_report}
+        --decisions ${decisions} --adaptor-report ${adaptor_report} --min-length ${params.min_seq_len}
+    """
+}
+
+// How much of each FCS-GX FIX region on the screened genome aligns to the nuclear reference. Coverage
+// is measured the same way as for unplaced contigs. Only reads the flagged FASTA line by line, so it
+// handles whole chromosomes without building them in memory.
+process ALIGN_FCS_FIX_TO_REFERENCE {
+    tag        { sample_id }
+    label      'map'
+    publishDir { "${params.outdir}/qc/contamination/${sample_id}" }, mode: 'copy'
+    container  'quay.io/biocontainers/minimap2:2.30--h577a1d6_0'
+    containerOptions '--unsquash'
+
+    input:
+    tuple val(sample_id), path(flagged), path(gx_report)
+    path reference
+
+    output:
+    tuple val(sample_id), path("${sample_id}_fcs_fix_ref_aligned.tsv"), emit: table
+
+    script:
+    """
+    awk -F '\\t' -v OFS='\\t' '!/^#/ && NF && \$5 == "FIX" { print \$1, \$2, \$3, \$5, \$6, \$8 }' ${gx_report} > fix_regions.tsv
+    : > fix.paf
+    if [ -s fix_regions.tsv ]; then
+        awk -F '\\t' '
+            NR == FNR { n++; seq[n] = \$1; st[n] = \$2; en[n] = \$3; next }
+            /^>/ { split(substr(\$0, 2), h, " "); name = h[1]; pos = 0; next }
+            {
+                len = length(\$0)
+                for (i = 1; i <= n; i++) if (seq[i] == name && st[i] <= pos + len && en[i] > pos) {
+                    from = st[i] > pos ? st[i] - pos : 1
+                    to = en[i] < pos + len ? en[i] - pos : len
+                    region[i] = region[i] substr(\$0, from, to - from + 1)
+                }
+                pos += len
+            }
+            END { for (i = 1; i <= n; i++) print ">" seq[i] ":" st[i] "-" en[i] "\\n" region[i] }
+        ' fix_regions.tsv ${flagged} > fix_regions.fasta
+        minimap2 -x asm20 --secondary=no -t ${task.cpus} ${reference} fix_regions.fasta > fix.paf
+    fi
+
+    sort -k1,1 -k3,3n fix.paf | awk -F '\\t' -v OFS='\\t' '
+        function flush() { if (q != "") print q, c }
+        \$1 != q { flush(); q = \$1; c = 0; e = -1 }
+        {
+            if (\$3 > e) { c += \$4 - \$3; e = \$4 }
+            else if (\$4 > e) { c += \$4 - e; e = \$4 }
+        }
+        END { flush() }' > aligned_bp.tsv
+
+    awk -F '\\t' -v OFS='\\t' '
+        BEGIN { print "sequence", "start", "stop", "action", "div", "top_tax", "aligned_bp", "length", "aligned_frac" }
+        FILENAME == ARGV[1] { bp[\$1] = \$2; next }
+        {
+            key = \$1 ":" \$2 "-" \$3
+            aligned = (key in bp) ? bp[key] : 0
+            size = \$3 - \$2 + 1
+            print \$1, \$2, \$3, \$4, \$5, \$6, aligned, size, aligned / size
+        }' aligned_bp.tsv fix_regions.tsv > ${sample_id}_fcs_fix_ref_aligned.tsv
+    rm -f fix_regions.fasta
     """
 }
 
 // Second round for a genome whose final screen had hits: the same rule sees both FCS-GX reports,
 // then the first-round genome is trimmed again. Its files are staged in round1/ because the
 // outputs have the same names. Sequences stay in both rounds' FASTAs under 'plus' IDs, so the
-// decision table is converted to match them for the writer.
+// decision table is converted to match them for the writer. FCS-GX FIX regions on placed sequences
+// are then cut from the final genome only; see bin/canopy_cut_placed_fix.py.
 process REFINE_GENOME_VERSIONS {
     tag           { sample_id }
     label         'qc_light'
@@ -675,21 +737,23 @@ process REFINE_GENOME_VERSIONS {
     publishDir    { "${params.outdir}/qc/contamination/${sample_id}/decisions" }, mode: 'copy', overwrite: true,
                   pattern: "*_{contig_decisions.tsv,contaminant_ids.txt,review_ids.txt,contamination_summary.txt}"
     publishDir    { "${params.outdir}/assembly/final/${sample_id}" }, mode: 'copy', overwrite: true,
-                  pattern: "*_{final.fasta,final.agp,full_flagged.fasta,full_flagged.agp,adapter_trims.tsv,final_stats.txt}"
+                  pattern: "*_{final.fasta,final.agp,full_flagged.fasta,full_flagged.agp,adapter_trims.tsv,final_stats.txt,placed_fcs_cuts.tsv}"
     container     'quay.io/biocontainers/blobtools:1.1.1--py_1'
 
     input:
     tuple val(sample_id), path(audit), path(blob_files), path(fcs_full), path(fungal), path(blast),
           path(flagged, stageAs: 'round1/*'), path(flagged_agp, stageAs: 'round1/*'),
-          path(prior_trims, stageAs: 'round1/*'), path(gx_final), path(adaptor_final)
+          path(prior_trims, stageAs: 'round1/*'), path(gx_final), path(adaptor_final), path(fix_table)
     path rule_script
     path writer_script
     path merge_script
+    path cut_script
 
     output:
     tuple val(sample_id), path("${sample_id}_final.fasta"), emit: assembly
     tuple val(sample_id), path("${sample_id}_final.agp"), path("${sample_id}_full_flagged.fasta"),
-          path("${sample_id}_full_flagged.agp"), path("${sample_id}_adapter_trims.tsv"), emit: extras
+          path("${sample_id}_full_flagged.agp"), path("${sample_id}_adapter_trims.tsv"),
+          path("${sample_id}_placed_fcs_cuts.tsv"), emit: extras
     tuple val(sample_id), path("${sample_id}_final_stats.txt"), emit: stats
     tuple val(sample_id), path("${sample_id}_contig_decisions.tsv"), emit: decisions
     tuple val(sample_id), path("${sample_id}_contamination_summary.txt"), emit: summary
@@ -706,15 +770,40 @@ process REFINE_GENOME_VERSIONS {
     awk -F '\\t' -v OFS='\\t' 'NR > 1 { gsub(/\\+/, "plus", \$1) } { print }' \\
         ${sample_id}_contig_decisions.tsv > decisions_safe_ids.tsv
     python3 ${writer_script} --sample ${sample_id} --fasta ${flagged} --agp ${flagged_agp} \\
-        --decisions decisions_safe_ids.tsv --adaptor-report ${adaptor_final}
+        --decisions decisions_safe_ids.tsv --adaptor-report ${adaptor_final} --min-length ${params.min_seq_len}
     python3 ${merge_script} --prior ${prior_trims} --new ${sample_id}_adapter_trims.tsv \\
-        --decisions ${sample_id}_contig_decisions.tsv --stats ${sample_id}_final_stats.txt
+        --decisions ${sample_id}_contig_decisions.tsv --stats ${sample_id}_final_stats.txt \\
+        --final ${sample_id}_final.fasta
+    python3 ${cut_script} --sample ${sample_id} --table ${fix_table} --decisions decisions_safe_ids.tsv \\
+        --screened-agp ${flagged_agp} --final-fasta ${sample_id}_final.fasta --final-agp ${sample_id}_final.agp \\
+        --flagged-fasta ${sample_id}_full_flagged.fasta --flagged-agp ${sample_id}_full_flagged.agp \\
+        --stats ${sample_id}_final_stats.txt --max-ref ${params.contam_max_ref_aligned} --min-length ${params.min_seq_len}
     rm -f gx_both_rounds.txt decisions_safe_ids.tsv
     """
 }
 
+// The chloroplast and mitochondria in one FASTA, so one FCS-GX run (one ~470 GiB database load)
+// screens both. IDs get a chloroplast_ / mitochondria_ prefix so hits can be traced back.
+process COMBINE_ORGANELLES {
+    tag        { sample_id }
+    label      'qc_light'
+    container  'quay.io/biocontainers/seqkit:2.13.0--he881be0_0'
+
+    input:
+    tuple val(sample_id), path(cp, stageAs: 'cp.fasta'), path(mt, stageAs: 'mt.fasta')
+
+    output:
+    tuple val(sample_id), val('organelles'), path("${sample_id}_organelles.fasta"), emit: assembly
+
+    script:
+    """
+    { sed '/^>/ s/^>/>chloroplast_/' cp.fasta; sed '/^>/ s/^>/>mitochondria_/' mt.fasta; } > ${sample_id}_organelles.fasta
+    """
+}
+
 // Screens of the published FASTA, as one key=value file for the report. Hits are reported rather
-// than failing the run, so the evidence is published for inspection.
+// than failing the run, so the evidence is published for inspection. The organelle screens are
+// reported separately (organelle_*) and do not change screen_status, which is the nuclear genome's.
 process NCBI_SCREEN_SUMMARY {
     tag        { sample_id }
     label      'qc_light'
@@ -722,7 +811,7 @@ process NCBI_SCREEN_SUMMARY {
     container  'quay.io/biocontainers/seqkit:2.13.0--he881be0_0'
 
     input:
-    tuple val(sample_id), path(stats), path(gx_report), path(adaptor_report)
+    tuple val(sample_id), path(stats), path(gx_report), path(adaptor_report), path(org_gx_report), path(org_adaptor_report)
 
     output:
     tuple val(sample_id), path("${sample_id}_ncbi_screen.txt"), emit: summary
@@ -735,6 +824,10 @@ process NCBI_SCREEN_SUMMARY {
     db=\$(head -1 ${gx_report} | grep -o '"build-date": "[0-9-]*"' | grep -o '[0-9][0-9-]*' | head -1)
     status=PASS
     if [ "\$gx_exclude" != 0 ] || [ "\$gx_other" != 0 ] || [ "\$adaptor" != 0 ]; then status=CHECK; fi
+    org_gx=\$(awk -F '\\t' '!/^#/ && NF' ${org_gx_report} | wc -l)
+    org_adaptor=\$(awk '!/^#/ && NF' ${org_adaptor_report} | wc -l)
+    org_status=PASS
+    if [ "\$org_gx" != 0 ] || [ "\$org_adaptor" != 0 ]; then org_status=CHECK; fi
     {
         cat ${stats}
         echo "gx_exclude=\$gx_exclude"
@@ -742,6 +835,9 @@ process NCBI_SCREEN_SUMMARY {
         echo "adaptor_hits=\$adaptor"
         echo "gx_db_build=\${db:-unknown}"
         echo "screen_status=\$status"
+        echo "organelle_gx_actions=\$org_gx"
+        echo "organelle_adaptor_hits=\$org_adaptor"
+        echo "organelle_screen_status=\$org_status"
     } > ${sample_id}_ncbi_screen.txt
     """
 }

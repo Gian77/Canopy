@@ -15,7 +15,6 @@ checked against its stats before the release is written.
 """
 import argparse
 import csv
-import glob
 import hashlib
 import os
 import shutil
@@ -89,7 +88,7 @@ def destination(sample, rel):
     if name in (f"{sample}_final.fasta", f"{sample}_final.agp", f"{sample}_full_flagged.fasta",
                 f"{sample}_full_flagged.agp", f"{sample}_chloroplast.fasta", f"{sample}_mitochondria.fasta"):
         return os.path.join("genome", name)
-    if name in (f"{sample}_contig_decisions.tsv", f"{sample}_adapter_trims.tsv",
+    if name in (f"{sample}_contig_decisions.tsv", f"{sample}_adapter_trims.tsv", f"{sample}_placed_fcs_cuts.tsv",
                 f"{sample}_blast_corroboration.tsv", f"{sample}_sylph_corroboration.tsv"):
         return os.path.join("evidence", name)
     if name.startswith("quast_") or name in (f"{sample}_assembly_summary.md", "busco_nuclear_final_summary.txt",
@@ -121,9 +120,7 @@ for s in a.samples:
     report_to_html(summary)
     report_to_html(os.path.join(O, "qc", "pipeline_tools.md"))
 
-    for png in glob.glob(os.path.join(R, "qc", "blobtools", s, "blobtax_*.png")):
-        os.makedirs(os.path.join(O, "evidence", "blobplots"), exist_ok=True)
-        shutil.copy2(png, os.path.join(O, "evidence", "blobplots", os.path.basename(png)))
+    # The blob plots come with the zip (evidence/blobtools/); they are not copied a second time.
     if a.extra_evidence:
         shutil.copy2(os.path.join(a.extra_evidence, f"{s}.contig_evidence.tsv"), os.path.join(O, "evidence"))
 
@@ -153,6 +150,9 @@ for s in a.samples:
         "fcs_adaptor_hits_final": screen["adaptor_hits"],
         "screen_status": screen["screen_status"],
         "fcs_gx_db_build": screen["gx_db_build"],
+        "organelle_fcs_gx_actions": screen.get("organelle_gx_actions", "not_screened"),
+        "organelle_fcs_adaptor_hits": screen.get("organelle_adaptor_hits", "not_screened"),
+        "organelle_screen_status": screen.get("organelle_screen_status", "not_screened"),
     })
 
 with open(os.path.join(a.release, "summary_all_samples.tsv"), "w", newline="") as fh:

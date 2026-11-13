@@ -33,3 +33,12 @@ databases/
 
 # ---- Python bytecode ----
 __pycache__/
+organelle_fcs/
+
+# Old outputs replaced by newer ones; kept until deleted by hand
+superseded/
+*.tar.gz
+
+# Personal notes, not needed to run the pipeline
+PROGRESS.md
+docs/history/

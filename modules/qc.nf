@@ -130,7 +130,7 @@ process QUAST_NUCLEAR {
     // (e.g. asm_medaka_scaffold / asm_scaffold / asm_decontam when absent) receive a
     // passthrough and are excluded from the QUAST command via the has_* flags.
     tuple val(sample_id),
-          path(asm_flye,            stageAs: 'asm_flye.fasta'),
+          path(asm_draft,           stageAs: 'asm_draft.fasta'),
           path(asm_medaka,          stageAs: 'asm_medaka.fasta'),
           path(asm_medaka_scaffold, stageAs: 'asm_medaka_scaffold.fasta'),
           path(asm_purge,           stageAs: 'asm_purge.fasta'),
@@ -149,13 +149,13 @@ process QUAST_NUCLEAR {
     def ref_arg     = reference  ? "--reference ${reference}" : ""
     def ref_asm     = reference  ? " ${reference}" : ""
     def purge_label = "purge_dups"   // purge_dups always runs now
-    // Build the column list in order: flye, medaka, [medaka_scaf], purge_dups, [purge_dups_scaf],
+    // Build the column list in order: assembler (hifiasm or flye), medaka, [medaka_scaf], purge_dups, [purge_dups_scaf],
     // [decontam], [reference]. Both scaffolded columns carry their source stage in the name
     // ("medaka_scaf" / "purge_dups_scaf") so the report's qval lookups can target either one
     // unambiguously. decontam (contaminant-flagged final genome) lands last, right before
     // reference, since it's derived from whichever final scaffold was selected.
-    def labels = ['flye', 'medaka']
-    def asms   = ['asm_flye.fasta', 'asm_medaka.fasta']
+    def labels = [params.nuclear_assembler, 'medaka']
+    def asms   = ['asm_draft.fasta', 'asm_medaka.fasta']
     if (has_medaka_scaffold) { labels << 'medaka_scaf'; asms << 'asm_medaka_scaffold.fasta' }
     labels << purge_label;     asms << 'asm_purge.fasta'
     if (has_scaffold)        { labels << 'purge_dups_scaf'; asms << 'asm_scaffold.fasta' }
@@ -314,18 +314,18 @@ process BLOBTOOLS_COVERAGE {
 }
 
 process FILTER_ORGANELLE_CONTIGS {
-    tag       { "${sample_id}_${compartment}" }
+    tag       { "${sample_id}_${compartment}_${arm}" }
     label     'map'
-    publishDir { "${params.outdir}/assembly/${compartment}/${sample_id}" }, mode: 'copy'
+    publishDir { "${params.outdir}/assembly/${compartment}/${sample_id}/candidates" }, mode: 'copy'
     container 'quay.io/biocontainers/minimap2:2.30--h577a1d6_0'
 
     input:
-    tuple val(sample_id), val(compartment), path(raw_assembly), path(reference)
+    tuple val(sample_id), val(compartment), val(arm), path(raw_assembly), path(reference)
 
     output:
-    tuple val(sample_id), val(compartment), path("${sample_id}_${compartment}_filtered.fasta"), emit: filtered
-    tuple val(sample_id), val(compartment), path("${sample_id}_${compartment}_alignment.paf"),  emit: paf
-    tuple val(sample_id), val(compartment), path("${sample_id}_${compartment}_kept_ids.txt"),    emit: ids
+    tuple val(sample_id), val(compartment), val(arm), path("${sample_id}_${compartment}_${arm}_filtered.fasta"), emit: filtered
+    tuple val(sample_id), val(compartment), path("${sample_id}_${compartment}_${arm}_alignment.paf"),  emit: paf
+    tuple val(sample_id), val(compartment), path("${sample_id}_${compartment}_${arm}_kept_ids.txt"),    emit: ids
 
     script:
     """
@@ -333,9 +333,9 @@ process FILTER_ORGANELLE_CONTIGS {
     # PAF columns: 1=qname 2=qlen 3=qstart 4=qend 5=strand 6=tname 7=tlen 8=tstart 9=tend 10=matches 11=alnlen
     if [ -s ${raw_assembly} ]; then
         minimap2 -cx asm10 -t ${task.cpus} ${reference} ${raw_assembly} \\
-            > ${sample_id}_${compartment}_alignment.paf
+            > ${sample_id}_${compartment}_${arm}_alignment.paf
     else
-        : > ${sample_id}_${compartment}_alignment.paf
+        : > ${sample_id}_${compartment}_${arm}_alignment.paf
     fi
 
     # Keep contigs where:
@@ -354,18 +354,47 @@ process FILTER_ORGANELLE_CONTIGS {
                  identity = cov[c] / aln[c]
                  if (frac_q > 0.5 && identity > 0.7) print c
              }
-         }' ${sample_id}_${compartment}_alignment.paf | sort -u \\
-         > ${sample_id}_${compartment}_kept_ids.txt
+         }' ${sample_id}_${compartment}_${arm}_alignment.paf | sort -u \\
+         > ${sample_id}_${compartment}_${arm}_kept_ids.txt
 
     # Extract kept contigs (using awk; no seqkit dep needed)
-    if [ -s ${sample_id}_${compartment}_kept_ids.txt ]; then
-        awk 'BEGIN { while ((getline line < "'${sample_id}_${compartment}_kept_ids.txt'") > 0) keep[line]=1 }
+    if [ -s ${sample_id}_${compartment}_${arm}_kept_ids.txt ]; then
+        awk 'BEGIN { while ((getline line < "'${sample_id}_${compartment}_${arm}_kept_ids.txt'") > 0) keep[line]=1 }
              /^>/ { name = substr(\$1, 2); flag = (name in keep); if (flag) print; next }
              { if (flag) print }' \\
-             ${raw_assembly} > ${sample_id}_${compartment}_filtered.fasta
+             ${raw_assembly} > ${sample_id}_${compartment}_${arm}_filtered.fasta
     else
         echo "No contigs passed filter for ${compartment}" >&2
-        : > ${sample_id}_${compartment}_filtered.fasta
+        : > ${sample_id}_${compartment}_${arm}_filtered.fasta
     fi
+    """
+}
+
+// Keeps one assembly per organelle. The rule is in bin/canopy_select_organelle.py.
+process SELECT_ORGANELLE {
+    tag        { "${sample_id}_${compartment}" }
+    label      'qc_light'
+    publishDir { "${params.outdir}/assembly/${compartment}/${sample_id}" }, mode: 'copy'
+    container  'quay.io/biocontainers/multiqc:1.25.1--pyhdfd78af_0'
+
+    input:
+    tuple val(sample_id), val(compartment), val(candidate_args), path(candidates),
+          path(flye_info, stageAs: 'flye_assembly_info.txt'), path(reference)
+    path select_script
+
+    output:
+    tuple val(sample_id), val(compartment), path("${sample_id}_${compartment}_selected.fasta"), emit: assembly
+    tuple val(sample_id), val(compartment), path("${sample_id}_${compartment}_choice.tsv"),     emit: table
+    tuple val(sample_id), val(compartment), path("${sample_id}_${compartment}_choice.md"),      emit: markdown
+
+    script:
+    def tolerance = compartment == 'chloroplast' ? params.organelle_cp_size_tol : params.organelle_mt_size_tol
+    def info_arg  = flye_info ? "--flye-info ${flye_info}" : ''
+    """
+    python3 ${select_script} --sample ${sample_id} --compartment ${compartment} \\
+        --reference ${reference} --tolerance ${tolerance} ${candidate_args} ${info_arg} \\
+        --output ${sample_id}_${compartment}_selected.fasta \\
+        --table ${sample_id}_${compartment}_choice.tsv \\
+        --markdown ${sample_id}_${compartment}_choice.md
     """
 }
