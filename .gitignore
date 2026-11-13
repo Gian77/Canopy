@@ -35,6 +35,10 @@ databases/
 __pycache__/
 organelle_fcs/
 
-# Files kept for now but no longer needed; delete by hand when sure
-trash/
+# Old outputs replaced by newer ones; kept until deleted by hand
+superseded/
 *.tar.gz
+
+# Personal notes, not needed to run the pipeline
+PROGRESS.md
+docs/history/
